@@ -114,6 +114,11 @@ type Filesystem struct {
 	receiverFS          *pdu.Filesystem
 	promBytesReplicated prometheus.Counter // compat
 
+	// empty string means receiver did not present a resume token
+	resumeTokenRaw string
+	// nil if resumeTokenRaw == "", else guaranteed to be decoded version of resumeTokenRaw
+	resumeToken *zfs.ResumeToken
+
 	sizeEstimateRequestSem *semaphore.S
 }
 
@@ -145,8 +150,9 @@ type Step struct {
 	sender   Sender
 	receiver Receiver
 
-	parent   *Filesystem
-	from, to *pdu.FilesystemVersion // compat
+	parent      *Filesystem
+	from, to    *pdu.FilesystemVersion // from may be nil, indicating full send
+	resumeToken string                 // empty means no resume token shall be used
 
 	expectedSize int64 // 0 means no size estimate present / possible
 
@@ -186,7 +192,6 @@ func (s *Step) ReportInfo() *report.StepInfo {
 	}
 	s.byteCounterMtx.Unlock()
 
-	// FIXME stick to zfs convention of from and to
 	from := ""
 	if s.from != nil {
 		from = s.from.RelName()
@@ -194,6 +199,7 @@ func (s *Step) ReportInfo() *report.StepInfo {
 	return &report.StepInfo{
 		From:            from,
 		To:              s.to.RelName(),
+		Resumed:         s.resumeToken != "",
 		BytesExpected:   s.expectedSize,
 		BytesReplicated: byteCounter,
 	}
@@ -259,14 +265,29 @@ func (p *Planner) doPlanning(ctx context.Context) ([]*Filesystem, error) {
 				receiverFS = rfs
 			}
 		}
+		// receiverFS may be nil!
 
 		ctr := p.promBytesReplicated.WithLabelValues(fs.Path)
+
+		var resumeTokenDecoded *zfs.ResumeToken
+		var resumeTokenRaw string
+		if receiverFS != nil && receiverFS.ResumeToken != "" {
+			log.WithField("receiverFS.ResumeToken", receiverFS.ResumeToken).Debug("receiver fs resume token")
+			resumeTokenDecoded, err = zfs.ParseResumeToken(ctx, receiverFS.ResumeToken) // shadow
+			if err != nil {
+				log.WithError(err).Error("cannot decode resume token")
+				return nil, err
+			}
+			resumeTokenRaw = receiverFS.ResumeToken
+		}
 
 		q = append(q, &Filesystem{
 			sender:                 p.sender,
 			receiver:               p.receiver,
 			Path:                   fs.Path,
 			receiverFS:             receiverFS,
+			resumeTokenRaw:         resumeTokenRaw,
+			resumeToken:            resumeTokenDecoded,
 			promBytesReplicated:    ctr,
 			sizeEstimateRequestSem: sizeEstimateRequestSem,
 		})
@@ -341,6 +362,26 @@ func (fs *Filesystem) doPlanning(ctx context.Context) ([]*Step, error) {
 				from:     path[i],
 				to:       path[i+1],
 			})
+		}
+	}
+
+	// inspect first step to determine whether we can use the resume token
+	// if the first step is something different than what the resume token started, discard it
+	if fs.resumeToken != nil {
+		toGuidsMatch := steps[0].to.Guid == fs.resumeToken.ToGUID
+		hasFromGuidsMatch := steps[0].from != nil == fs.resumeToken.HasFromGUID
+		// use shortcircuiting
+		fromGuidsMatch := hasFromGuidsMatch &&
+			(steps[0].from == nil || steps[0].from.Guid == fs.resumeToken.FromGUID)
+		// FIXME we have very similar logic in the receiver (it also validates ToName though, which we can't if this code doesn't run on the sender, i.e. can't do it in pull mode)
+		log.WithField("toGuidsMatch", toGuidsMatch).WithField("fromGuidsMatch", fromGuidsMatch).
+			WithField("fs.ResumeToken", fmt.Sprintf("%#v", fs.resumeToken)).
+			WithField("steps[0]", fmt.Sprintf("%#v", steps[0])).
+			Debug("resume token eligibilty check")
+		if toGuidsMatch && fromGuidsMatch {
+			steps[0].resumeToken = fs.resumeTokenRaw
+		} else {
+			steps[0].resumeToken = ""
 		}
 	}
 
@@ -432,16 +473,18 @@ func (s *Step) buildSendRequest(dryRun bool) (sr *pdu.SendReq) {
 	fs := s.parent.Path
 	if s.from == nil {
 		sr = &pdu.SendReq{
-			Filesystem: fs,
-			To:         s.to.RelName(),
-			DryRun:     dryRun,
+			Filesystem:  fs,
+			To:          s.to.RelName(),
+			DryRun:      dryRun,
+			ResumeToken: s.resumeToken,
 		}
 	} else {
 		sr = &pdu.SendReq{
-			Filesystem: fs,
-			From:       s.from.RelName(),
-			To:         s.to.RelName(),
-			DryRun:     dryRun,
+			Filesystem:  fs,
+			From:        s.from.RelName(),
+			To:          s.to.RelName(),
+			DryRun:      dryRun,
+			ResumeToken: s.resumeToken,
 		}
 	}
 	return sr

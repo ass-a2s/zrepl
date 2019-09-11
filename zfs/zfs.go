@@ -112,6 +112,14 @@ func (p *DatasetPath) UnmarshalJSON(b []byte) error {
 	return json.Unmarshal(b, &p.comps)
 }
 
+func (p *DatasetPath) Pool() (string, error) {
+	if len(p.comps) < 1 {
+		return "", fmt.Errorf("dataset path does not have a pool component")
+	}
+	return p.comps[0], nil
+
+}
+
 func NewDatasetPath(s string) (p *DatasetPath, err error) {
 	p = &DatasetPath{}
 	if s == "" {
@@ -643,7 +651,7 @@ func (s *DrySendInfo) unmarshalInfoLine(l string) (regexMatched bool, err error)
 	return true, nil
 }
 
-// from may be "", in which case a full ZFS send is done
+// to may be "", in which case a full ZFS send is done
 // May return BookmarkSizeEstimationNotSupported as err if from is a bookmark.
 func ZFSSendDry(fs string, from, to string, token string) (_ *DrySendInfo, err error) {
 
@@ -712,6 +720,8 @@ type RecvOptions struct {
 	// Rollback to the oldest snapshot, destroy it, then perform `recv -F`.
 	// Note that this doesn't change property values, i.e. an existing local property value will be kept.
 	RollbackAndForceRecv bool
+	// Set -s flag used for resumable send & recv
+	SavePartialRecvState bool
 }
 
 func ZFSRecv(ctx context.Context, fs string, streamCopier StreamCopier, opts RecvOptions) (err error) {
@@ -764,6 +774,9 @@ func ZFSRecv(ctx context.Context, fs string, streamCopier StreamCopier, opts Rec
 	args = append(args, "recv")
 	if opts.RollbackAndForceRecv {
 		args = append(args, "-F")
+	}
+	if opts.SavePartialRecvState {
+		args = append(args, "-s")
 	}
 	args = append(args, fs)
 
@@ -923,6 +936,30 @@ func zfsSet(path string, props *ZFSProperties) (err error) {
 
 func ZFSGet(fs *DatasetPath, props []string) (*ZFSProperties, error) {
 	return zfsGet(fs.ToString(), props, sourceAny)
+}
+
+// The returned error includes requested filesystem and version as quoted strings in its error message
+func ZFSGetGUID(fs string, version string) (g uint64, err error) {
+	defer func(e *error) {
+		if *e != nil {
+			*e = fmt.Errorf("zfs get guid fs=%q version=%q: %s", fs, version, *e)
+		}
+	}(&err)
+	if len(fs) == 0 {
+		return 0, errors.New("fs must have non-zero length")
+	}
+	if len(version) == 0 {
+		return 0, errors.New("version must have non-zero length")
+	}
+	if strings.IndexAny(version[0:1], "@#") != 0 {
+		return 0, errors.New("version does not start with @ or #")
+	}
+	path := fmt.Sprintf("%s%s", fs, version)
+	props, err := zfsGet(path, []string{"guid"}, sourceAny) // always local
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseUint(props.Get("guid"), 10, 64)
 }
 
 func ZFSGetRawAnySource(path string, props []string) (*ZFSProperties, error) {

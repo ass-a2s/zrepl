@@ -45,12 +45,12 @@ message FilesystemVersion {
 
 message SendReq {
     string Filesystem  = 1;
+    // May be empty / null to request a full transfer of To
     string From = 2;
-    // May be empty / null to request a full transfer of From
     string To = 3;
 
-    // If ResumeToken is not empty, the resume token that CAN be tried for 'zfs send' by the sender.
-    // The sender MUST indicate in SendRes.UsedResumeToken
+    // If ResumeToken is not empty, the resume token that CAN be used for 'zfs send' by the sender.
+    // The sender MUST indicate use of ResumeToken in the reply message SendRes.UsedResumeToken
     // If it does not work, the sender SHOULD clear the resume token on their side
     // and use From and To instead
     // If ResumeToken is not empty, the GUIDs of From and To
@@ -70,6 +70,7 @@ message Property {
 
 message SendRes {
     // Whether the resume token provided in the request has been used or not.
+    // If the SendReq.ResumeToken == "", this field has no meaning.
     bool UsedResumeToken = 2;
 
     // Expected stream size determined by dry run, not exact.

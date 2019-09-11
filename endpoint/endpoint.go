@@ -4,7 +4,9 @@ package endpoint
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
+	"strings"
 
 	"github.com/pkg/errors"
 
@@ -51,7 +53,7 @@ func (s *Sender) ListFilesystems(ctx context.Context, r *pdu.ListFilesystemReq) 
 	for i := range fss {
 		rfss[i] = &pdu.Filesystem{
 			Path: fss[i].ToString(),
-			// FIXME: not supporting ResumeToken yet
+			// ResumeToken does not make sense from Sender
 			IsPlaceholder: false, // sender FSs are never placeholders
 		}
 	}
@@ -80,8 +82,87 @@ func (s *Sender) ListFilesystemVersions(ctx context.Context, r *pdu.ListFilesyst
 var maxConcurrentZFSSendSemaphore = semaphore.New(envconst.Int64("ZREPL_ENDPOINT_MAX_CONCURRENT_SEND", 10))
 
 func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.StreamCopier, error) {
+
+	if r.Filesystem == "" {
+		return nil, nil, errors.New("`Filesystems` field in SendReq must not be empty")
+	}
+	if r.To == "" {
+		return nil, nil, errors.New("`To` field in SendReq must not be empty")
+	}
+	if strings.IndexAny(r.To[0:1], "@#") != 0 {
+		return nil, nil, errors.New("`To` field in SendReq must start with @ or #")
+	}
+	// r.From may be empty for full send
+	if r.From != "" && strings.IndexAny(r.From[0:1], "@#") != 0 {
+		return nil, nil, errors.New("`From` field in SendReq must start with @ or #")
+	}
+
 	_, err := s.filterCheckFS(r.Filesystem)
 	if err != nil {
+		return nil, nil, err
+	}
+
+	type rtValErr struct{ error }
+	type rtNotSupported struct{ error }
+	validateResumeToken := func() error {
+		if r.ResumeToken == "" {
+			return nil
+		}
+		resumeSupported, err := zfs.ResumeSendSupported()
+		if err != nil {
+			return errors.Wrap(err, "check for resume send support failed")
+		}
+		if !resumeSupported {
+			return rtNotSupported{fmt.Errorf("resumable send not supported")}
+		}
+
+		token, err := zfs.ParseResumeToken(ctx, r.ResumeToken)
+		switch {
+		case err == zfs.ResumeTokenDecodingNotSupported || err == zfs.ResumeTokenParsingError:
+			return rtNotSupported{err} // might be error on our side, be conservative and mark token unsupported
+		case err == zfs.ResumeTokenCorruptError:
+			return err // hard error by sender
+		case err != nil:
+			return errors.Wrap(err, "resume token decoding failed") // hard error by either side, be conservative
+		default:
+			// fallthrough
+		}
+		getLogger(ctx).WithField("resume token", fmt.Sprintf("%#v", token)).Debug("decoded resume token")
+		expToGUID, err := zfs.ZFSGetGUID(r.Filesystem, r.To)
+		if err != nil {
+			return err
+		}
+		var (
+			expFromGUID    uint64
+			expHasFromGUID bool
+		)
+		if r.From != "" {
+			expHasFromGUID = true
+			expFromGUID, err = zfs.ZFSGetGUID(r.Filesystem, r.From)
+			if err != nil {
+				return err
+			}
+		}
+		if err := token.ValidateCorrespondsToSend(r.Filesystem, expHasFromGUID, expFromGUID, expToGUID); err != nil {
+			return rtValErr{errors.Wrap(err, "resume token does not correspond to request send")}
+		}
+		return nil
+	}
+	err = validateResumeToken()
+	useResumeToken := ""
+	switch err := err.(type) {
+	case rtValErr:
+		getLogger(ctx).WithError(err.error).Error("token determined to be invalid, possible attack by peer")
+		return nil, nil, err.error
+	case rtNotSupported:
+		getLogger(ctx).WithError(err.error).Info("resume requested but not supported sender side, requesting discard and sending stream from beginning")
+		useResumeToken = "" // shadow
+		// fallthrough
+	case nil:
+		useResumeToken = r.ResumeToken
+		// fallthrough
+	default:
+		getLogger(ctx).WithError(err).Error("resume token validation could not be completed")
 		return nil, nil, err
 	}
 
@@ -95,7 +176,7 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.St
 	}
 	defer guard.Release()
 
-	si, err := zfs.ZFSSendDry(r.Filesystem, r.From, r.To, "")
+	si, err := zfs.ZFSSendDry(r.Filesystem, r.From, r.To, useResumeToken)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -104,13 +185,16 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.St
 	if si.SizeEstimate != -1 { // but si returns -1 for no size estimate
 		expSize = si.SizeEstimate
 	}
-	res := &pdu.SendRes{ExpectedSize: expSize}
+	res := &pdu.SendRes{
+		ExpectedSize:    expSize,
+		UsedResumeToken: useResumeToken != "",
+	}
 
 	if r.DryRun {
 		return res, nil, nil
 	}
 
-	streamCopier, err := zfs.ZFSSend(ctx, r.Filesystem, r.From, r.To, "")
+	streamCopier, err := zfs.ZFSSend(ctx, r.Filesystem, r.From, r.To, useResumeToken)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -282,8 +366,20 @@ func (s *Receiver) ListFilesystems(ctx context.Context, req *pdu.ListFilesystemR
 			err := errors.Errorf("inconsistent placeholder state: filesystem %q must exist in this context", a.ToString())
 			return nil, err
 		}
+		token, err := zfs.ZFSGetReceiveResumeTokenOrEmptyStringIfNotSupported(ctx, a)
+		if err != nil {
+			l.WithError(err).Error("cannot get receive resume token")
+			return nil, err
+		}
+		l.WithField("receive_resume_token", token).Debug("receive resume token")
+		fmt.Fprintf(os.Stderr, "FIXME LOGGING NOT WORKING HERE: receive_resume_token = %q\n", token)
 		a.TrimPrefix(root)
-		fss = append(fss, &pdu.Filesystem{Path: a.ToString(), IsPlaceholder: ph.IsPlaceholder})
+		fs := &pdu.Filesystem{
+			Path:          a.ToString(),
+			IsPlaceholder: ph.IsPlaceholder,
+			ResumeToken:   token,
+		}
+		fss = append(fss, fs)
 	}
 	if len(fss) == 0 {
 		getLogger(ctx).Debug("no filesystems found")
@@ -420,6 +516,17 @@ func (s *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq, receive zfs
 		if err := zfs.ZFSSetPlaceholder(lp, false); err != nil {
 			return nil, fmt.Errorf("cannot clear placeholder property for forced receive: %s", err)
 		}
+	}
+
+	if req.ClearResumeToken && ph.FSExists {
+		if err := zfs.ZFSRecvClearResumeToken(lp.ToString()); err != nil {
+			return nil, errors.Wrap(err, "cannot clear resume token")
+		}
+	}
+
+	recvOpts.SavePartialRecvState, err = zfs.ResumeRecvSupported(ctx, lp)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot determine whether we can use resumable send & recv")
 	}
 
 	getLogger(ctx).Debug("acquire concurrent recv semaphore")

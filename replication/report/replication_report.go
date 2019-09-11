@@ -87,6 +87,7 @@ type StepReport struct {
 
 type StepInfo struct {
 	From, To        string
+	Resumed         bool
 	BytesExpected   int64
 	BytesReplicated int64
 }
@@ -148,5 +149,5 @@ func (f *FilesystemReport) NextStep() *StepReport {
 }
 
 func (f *StepReport) IsIncremental() bool {
-	return f.Info.From != "" // FIXME change to ZFS semantics (To != "")
+	return f.Info.From != ""
 }

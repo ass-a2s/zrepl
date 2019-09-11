@@ -731,7 +731,10 @@ func (t *tui) printFilesystemStatus(rep *report.FilesystemReport, active bool, m
 			if nextStep.IsIncremental() {
 				next = fmt.Sprintf("next: %s => %s", nextStep.Info.From, nextStep.Info.To)
 			} else {
-				next = fmt.Sprintf("next: %s (full)", nextStep.Info.To)
+				next = fmt.Sprintf("next: full send %s", nextStep.Info.To)
+			}
+			if nextStep.Info.Resumed {
+				next += " (resumed)"
 			}
 		} else {
 			next = "" // individual FSes may still be in planning state

@@ -43,7 +43,7 @@ func (x FilesystemVersion_VersionType) String() string {
 	return proto.EnumName(FilesystemVersion_VersionType_name, int32(x))
 }
 func (FilesystemVersion_VersionType) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{5, 0}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{5, 0}
 }
 
 type ListFilesystemReq struct {
@@ -56,7 +56,7 @@ func (m *ListFilesystemReq) Reset()         { *m = ListFilesystemReq{} }
 func (m *ListFilesystemReq) String() string { return proto.CompactTextString(m) }
 func (*ListFilesystemReq) ProtoMessage()    {}
 func (*ListFilesystemReq) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{0}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{0}
 }
 func (m *ListFilesystemReq) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ListFilesystemReq.Unmarshal(m, b)
@@ -87,7 +87,7 @@ func (m *ListFilesystemRes) Reset()         { *m = ListFilesystemRes{} }
 func (m *ListFilesystemRes) String() string { return proto.CompactTextString(m) }
 func (*ListFilesystemRes) ProtoMessage()    {}
 func (*ListFilesystemRes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{1}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{1}
 }
 func (m *ListFilesystemRes) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ListFilesystemRes.Unmarshal(m, b)
@@ -127,7 +127,7 @@ func (m *Filesystem) Reset()         { *m = Filesystem{} }
 func (m *Filesystem) String() string { return proto.CompactTextString(m) }
 func (*Filesystem) ProtoMessage()    {}
 func (*Filesystem) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{2}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{2}
 }
 func (m *Filesystem) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_Filesystem.Unmarshal(m, b)
@@ -179,7 +179,7 @@ func (m *ListFilesystemVersionsReq) Reset()         { *m = ListFilesystemVersion
 func (m *ListFilesystemVersionsReq) String() string { return proto.CompactTextString(m) }
 func (*ListFilesystemVersionsReq) ProtoMessage()    {}
 func (*ListFilesystemVersionsReq) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{3}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{3}
 }
 func (m *ListFilesystemVersionsReq) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ListFilesystemVersionsReq.Unmarshal(m, b)
@@ -217,7 +217,7 @@ func (m *ListFilesystemVersionsRes) Reset()         { *m = ListFilesystemVersion
 func (m *ListFilesystemVersionsRes) String() string { return proto.CompactTextString(m) }
 func (*ListFilesystemVersionsRes) ProtoMessage()    {}
 func (*ListFilesystemVersionsRes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{4}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{4}
 }
 func (m *ListFilesystemVersionsRes) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ListFilesystemVersionsRes.Unmarshal(m, b)
@@ -259,7 +259,7 @@ func (m *FilesystemVersion) Reset()         { *m = FilesystemVersion{} }
 func (m *FilesystemVersion) String() string { return proto.CompactTextString(m) }
 func (*FilesystemVersion) ProtoMessage()    {}
 func (*FilesystemVersion) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{5}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{5}
 }
 func (m *FilesystemVersion) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_FilesystemVersion.Unmarshal(m, b)
@@ -316,11 +316,11 @@ func (m *FilesystemVersion) GetCreation() string {
 
 type SendReq struct {
 	Filesystem string `protobuf:"bytes,1,opt,name=Filesystem,proto3" json:"Filesystem,omitempty"`
-	From       string `protobuf:"bytes,2,opt,name=From,proto3" json:"From,omitempty"`
-	// May be empty / null to request a full transfer of From
-	To string `protobuf:"bytes,3,opt,name=To,proto3" json:"To,omitempty"`
-	// If ResumeToken is not empty, the resume token that CAN be tried for 'zfs send' by the sender.
-	// The sender MUST indicate in SendRes.UsedResumeToken
+	// May be empty / null to request a full transfer of To
+	From string `protobuf:"bytes,2,opt,name=From,proto3" json:"From,omitempty"`
+	To   string `protobuf:"bytes,3,opt,name=To,proto3" json:"To,omitempty"`
+	// If ResumeToken is not empty, the resume token that CAN be used for 'zfs send' by the sender.
+	// The sender MUST indicate use of ResumeToken in the reply message SendRes.UsedResumeToken
 	// If it does not work, the sender SHOULD clear the resume token on their side
 	// and use From and To instead
 	// If ResumeToken is not empty, the GUIDs of From and To
@@ -339,7 +339,7 @@ func (m *SendReq) Reset()         { *m = SendReq{} }
 func (m *SendReq) String() string { return proto.CompactTextString(m) }
 func (*SendReq) ProtoMessage()    {}
 func (*SendReq) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{6}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{6}
 }
 func (m *SendReq) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_SendReq.Unmarshal(m, b)
@@ -420,7 +420,7 @@ func (m *Property) Reset()         { *m = Property{} }
 func (m *Property) String() string { return proto.CompactTextString(m) }
 func (*Property) ProtoMessage()    {}
 func (*Property) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{7}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{7}
 }
 func (m *Property) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_Property.Unmarshal(m, b)
@@ -456,6 +456,7 @@ func (m *Property) GetValue() string {
 
 type SendRes struct {
 	// Whether the resume token provided in the request has been used or not.
+	// If the SendReq.ResumeToken == "", this field has no meaning.
 	UsedResumeToken bool `protobuf:"varint,2,opt,name=UsedResumeToken,proto3" json:"UsedResumeToken,omitempty"`
 	// Expected stream size determined by dry run, not exact.
 	// 0 indicates that for the given SendReq, no size estimate could be made.
@@ -470,7 +471,7 @@ func (m *SendRes) Reset()         { *m = SendRes{} }
 func (m *SendRes) String() string { return proto.CompactTextString(m) }
 func (*SendRes) ProtoMessage()    {}
 func (*SendRes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{8}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{8}
 }
 func (m *SendRes) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_SendRes.Unmarshal(m, b)
@@ -524,7 +525,7 @@ func (m *ReceiveReq) Reset()         { *m = ReceiveReq{} }
 func (m *ReceiveReq) String() string { return proto.CompactTextString(m) }
 func (*ReceiveReq) ProtoMessage()    {}
 func (*ReceiveReq) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{9}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{9}
 }
 func (m *ReceiveReq) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ReceiveReq.Unmarshal(m, b)
@@ -568,7 +569,7 @@ func (m *ReceiveRes) Reset()         { *m = ReceiveRes{} }
 func (m *ReceiveRes) String() string { return proto.CompactTextString(m) }
 func (*ReceiveRes) ProtoMessage()    {}
 func (*ReceiveRes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{10}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{10}
 }
 func (m *ReceiveRes) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ReceiveRes.Unmarshal(m, b)
@@ -601,7 +602,7 @@ func (m *DestroySnapshotsReq) Reset()         { *m = DestroySnapshotsReq{} }
 func (m *DestroySnapshotsReq) String() string { return proto.CompactTextString(m) }
 func (*DestroySnapshotsReq) ProtoMessage()    {}
 func (*DestroySnapshotsReq) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{11}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{11}
 }
 func (m *DestroySnapshotsReq) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_DestroySnapshotsReq.Unmarshal(m, b)
@@ -647,7 +648,7 @@ func (m *DestroySnapshotRes) Reset()         { *m = DestroySnapshotRes{} }
 func (m *DestroySnapshotRes) String() string { return proto.CompactTextString(m) }
 func (*DestroySnapshotRes) ProtoMessage()    {}
 func (*DestroySnapshotRes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{12}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{12}
 }
 func (m *DestroySnapshotRes) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_DestroySnapshotRes.Unmarshal(m, b)
@@ -692,7 +693,7 @@ func (m *DestroySnapshotsRes) Reset()         { *m = DestroySnapshotsRes{} }
 func (m *DestroySnapshotsRes) String() string { return proto.CompactTextString(m) }
 func (*DestroySnapshotsRes) ProtoMessage()    {}
 func (*DestroySnapshotsRes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{13}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{13}
 }
 func (m *DestroySnapshotsRes) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_DestroySnapshotsRes.Unmarshal(m, b)
@@ -734,7 +735,7 @@ func (m *ReplicationCursorReq) Reset()         { *m = ReplicationCursorReq{} }
 func (m *ReplicationCursorReq) String() string { return proto.CompactTextString(m) }
 func (*ReplicationCursorReq) ProtoMessage()    {}
 func (*ReplicationCursorReq) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{14}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{14}
 }
 func (m *ReplicationCursorReq) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ReplicationCursorReq.Unmarshal(m, b)
@@ -882,7 +883,7 @@ func (m *ReplicationCursorReq_GetOp) Reset()         { *m = ReplicationCursorReq
 func (m *ReplicationCursorReq_GetOp) String() string { return proto.CompactTextString(m) }
 func (*ReplicationCursorReq_GetOp) ProtoMessage()    {}
 func (*ReplicationCursorReq_GetOp) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{14, 0}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{14, 0}
 }
 func (m *ReplicationCursorReq_GetOp) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ReplicationCursorReq_GetOp.Unmarshal(m, b)
@@ -913,7 +914,7 @@ func (m *ReplicationCursorReq_SetOp) Reset()         { *m = ReplicationCursorReq
 func (m *ReplicationCursorReq_SetOp) String() string { return proto.CompactTextString(m) }
 func (*ReplicationCursorReq_SetOp) ProtoMessage()    {}
 func (*ReplicationCursorReq_SetOp) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{14, 1}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{14, 1}
 }
 func (m *ReplicationCursorReq_SetOp) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ReplicationCursorReq_SetOp.Unmarshal(m, b)
@@ -954,7 +955,7 @@ func (m *ReplicationCursorRes) Reset()         { *m = ReplicationCursorRes{} }
 func (m *ReplicationCursorRes) String() string { return proto.CompactTextString(m) }
 func (*ReplicationCursorRes) ProtoMessage()    {}
 func (*ReplicationCursorRes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{15}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{15}
 }
 func (m *ReplicationCursorRes) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_ReplicationCursorRes.Unmarshal(m, b)
@@ -1090,7 +1091,7 @@ func (m *PingReq) Reset()         { *m = PingReq{} }
 func (m *PingReq) String() string { return proto.CompactTextString(m) }
 func (*PingReq) ProtoMessage()    {}
 func (*PingReq) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{16}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{16}
 }
 func (m *PingReq) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_PingReq.Unmarshal(m, b)
@@ -1129,7 +1130,7 @@ func (m *PingRes) Reset()         { *m = PingRes{} }
 func (m *PingRes) String() string { return proto.CompactTextString(m) }
 func (*PingRes) ProtoMessage()    {}
 func (*PingRes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_pdu_83b7e2a28d820622, []int{17}
+	return fileDescriptor_pdu_0b5bf4bab8d21b5a, []int{17}
 }
 func (m *PingRes) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_PingRes.Unmarshal(m, b)
@@ -1384,9 +1385,9 @@ var _Replication_serviceDesc = grpc.ServiceDesc{
 	Metadata: "pdu.proto",
 }
 
-func init() { proto.RegisterFile("pdu.proto", fileDescriptor_pdu_83b7e2a28d820622) }
+func init() { proto.RegisterFile("pdu.proto", fileDescriptor_pdu_0b5bf4bab8d21b5a) }
 
-var fileDescriptor_pdu_83b7e2a28d820622 = []byte{
+var fileDescriptor_pdu_0b5bf4bab8d21b5a = []byte{
 	// 785 bytes of a gzipped FileDescriptorProto
 	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x8c, 0x55, 0xd1, 0x8e, 0xe3, 0x34,
 	0x14, 0x9d, 0xb4, 0x69, 0x9b, 0xde, 0x0e, 0xbb, 0x1d, 0x4f, 0x59, 0x85, 0x00, 0xab, 0xca, 0xcb,
