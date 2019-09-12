@@ -20,6 +20,7 @@ message Filesystem {
     string Path = 1;
     string ResumeToken = 2;
     bool IsPlaceholder = 3;
+    bool IsEncrypted = 4;
 }
 
 message ListFilesystemVersionsReq {
@@ -42,12 +43,17 @@ message FilesystemVersion {
     string Creation = 5; // RFC 3339
 }
 
+enum Tri {
+    DontCare = 0;
+    False = 1;
+    True = 2;
+}
 
 message SendReq {
     string Filesystem  = 1;
     // May be empty / null to request a full transfer of To
-    string From = 2;
-    string To = 3;
+    FilesystemVersion From = 2;
+    FilesystemVersion To = 3;
 
     // If ResumeToken is not empty, the resume token that CAN be used for 'zfs send' by the sender.
     // The sender MUST indicate use of ResumeToken in the reply message SendRes.UsedResumeToken
@@ -57,10 +63,9 @@ message SendReq {
     // MUST correspond to those encoded in the ResumeToken.
     // Otherwise, the Sender MUST return an error.
     string ResumeToken  = 4;
-    bool Compress = 5;
-    bool Dedup = 6;
+    Tri Encrypted = 5;
 
-    bool DryRun = 7;
+    bool DryRun = 6;
 }
 
 message Property {

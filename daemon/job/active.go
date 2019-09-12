@@ -82,17 +82,19 @@ type activeMode interface {
 	DisconnectEndpoints()
 	SenderReceiver() (logic.Sender, logic.Receiver)
 	Type() Type
+	PlannerPolicy() logic.PlannerPolicy
 	RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{})
 	SnapperReport() *snapper.Report
 	ResetConnectBackoff()
 }
 
 type modePush struct {
-	setupMtx sync.Mutex
-	sender   *endpoint.Sender
-	receiver *rpc.Client
-	fsfilter endpoint.FSFilter
-	snapper  *snapper.PeriodicOrManual
+	setupMtx      sync.Mutex
+	sender        *endpoint.Sender
+	receiver      *rpc.Client
+	senderConfig  *endpoint.SenderConfig
+	plannerPolicy *logic.PlannerPolicy
+	snapper       *snapper.PeriodicOrManual
 }
 
 func (m *modePush) ConnectEndpoints(loggers rpc.Loggers, connecter transport.Connecter) {
@@ -101,7 +103,7 @@ func (m *modePush) ConnectEndpoints(loggers rpc.Loggers, connecter transport.Con
 	if m.receiver != nil || m.sender != nil {
 		panic("inconsistent use of ConnectEndpoints and DisconnectEndpoints")
 	}
-	m.sender = endpoint.NewSender(m.fsfilter)
+	m.sender = endpoint.NewSender(*m.senderConfig)
 	m.receiver = rpc.NewClient(connecter, loggers)
 }
 
@@ -121,6 +123,8 @@ func (m *modePush) SenderReceiver() (logic.Sender, logic.Receiver) {
 
 func (m *modePush) Type() Type { return TypePush }
 
+func (m *modePush) PlannerPolicy() logic.PlannerPolicy { return *m.plannerPolicy }
+
 func (m *modePush) RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{}) {
 	m.snapper.Run(ctx, wakeUpCommon)
 }
@@ -139,11 +143,18 @@ func (m *modePush) ResetConnectBackoff() {
 
 func modePushFromConfig(g *config.Global, in *config.PushJob) (*modePush, error) {
 	m := &modePush{}
+
 	fsf, err := filters.DatasetMapFilterFromConfig(in.Filesystems)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannnot build filesystem filter")
 	}
-	m.fsfilter = fsf
+	m.senderConfig = &endpoint.SenderConfig{
+		FSF:     fsf,
+		Encrypt: in.Send.Encrypted,
+	}
+	m.plannerPolicy = &logic.PlannerPolicy{
+		EncryptedSend: logic.TriFromBool(in.Send.Encrypted),
+	}
 
 	if m.snapper, err = snapper.FromConfig(g, fsf, in.Snapshotting); err != nil {
 		return nil, errors.Wrap(err, "cannot build snapper")
@@ -153,11 +164,12 @@ func modePushFromConfig(g *config.Global, in *config.PushJob) (*modePush, error)
 }
 
 type modePull struct {
-	setupMtx sync.Mutex
-	receiver *endpoint.Receiver
-	sender   *rpc.Client
-	rootFS   *zfs.DatasetPath
-	interval config.PositiveDurationOrManual
+	setupMtx      sync.Mutex
+	receiver      *endpoint.Receiver
+	sender        *rpc.Client
+	rootFS        *zfs.DatasetPath
+	plannerPolicy *logic.PlannerPolicy
+	interval      config.PositiveDurationOrManual
 }
 
 func (m *modePull) ConnectEndpoints(loggers rpc.Loggers, connecter transport.Connecter) {
@@ -185,6 +197,8 @@ func (m *modePull) SenderReceiver() (logic.Sender, logic.Receiver) {
 }
 
 func (*modePull) Type() Type { return TypePull }
+
+func (m *modePull) PlannerPolicy() logic.PlannerPolicy { return *m.plannerPolicy }
 
 func (m *modePull) RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{}) {
 	if m.interval.Manual {
@@ -233,6 +247,10 @@ func modePullFromConfig(g *config.Global, in *config.PullJob) (m *modePull, err 
 	}
 	if m.rootFS.Length() <= 0 {
 		return nil, errors.New("RootFS must not be empty") // duplicates error check of receiver
+	}
+
+	m.plannerPolicy = &logic.PlannerPolicy{
+		EncryptedSend: logic.DontCare,
 	}
 
 	return m, nil
@@ -383,7 +401,7 @@ func (j *ActiveSide) do(ctx context.Context) {
 			*tasks = activeSideTasks{}
 			tasks.replicationCancel = repCancel
 			tasks.replicationReport, repWait = replication.Do(
-				ctx, logic.NewPlanner(j.promRepStateSecs, j.promBytesReplicated, sender, receiver),
+				ctx, logic.NewPlanner(j.promRepStateSecs, j.promBytesReplicated, sender, receiver, j.mode.PlannerPolicy()),
 			)
 			tasks.state = ActiveSideReplicating
 		})

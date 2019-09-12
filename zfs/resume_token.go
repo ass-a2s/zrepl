@@ -15,10 +15,13 @@ import (
 	"github.com/zrepl/zrepl/util/envconst"
 )
 
+// NOTE: Update ZFSSendARgs.Validate when changning fields (potentially SECURITY SENSITIVE)
 type ResumeToken struct {
-	HasFromGUID, HasToGUID bool
-	FromGUID, ToGUID       uint64
-	ToName                 string
+	HasFromGUID, HasToGUID    bool
+	FromGUID, ToGUID          uint64
+	ToName                    string
+	HasCompressOK, CompressOK bool
+	HasRawOk, RawOK           bool
 }
 
 var resumeTokenNVListRE = regexp.MustCompile(`\t(\S+) = (.*)`)
@@ -41,8 +44,7 @@ func ResumeSendSupported() (bool, error) {
 		cmd := exec.Command("zfs", "send")
 		output, err := cmd.CombinedOutput()
 		if ee, ok := err.(*exec.ExitError); !ok || ok && !ee.Exited() {
-			debug("send resume feature check failed: %T %s", err, err)
-			resumeSendSupportedCheck.err = err
+			resumeSendSupportedCheck.err = errors.Wrap(err, "resumable send cli support feature check failed")
 		}
 		def := strings.Contains(string(output), "receive_resume_token")
 		resumeSendSupportedCheck.supported = envconst.Bool("ZREPL_EXPERIMENTAL_ZFS_SEND_RESUME_SUPPORTED", def)
@@ -226,6 +228,18 @@ func ParseResumeToken(ctx context.Context, token string) (*ResumeToken, error) {
 			rt.HasToGUID = true
 		case "toname":
 			rt.ToName = val
+		case "rawok":
+			rt.HasRawOk = true
+			rt.RawOK, err = strconv.ParseBool(val)
+			if err != nil {
+				return nil, ResumeTokenParsingError
+			}
+		case "compressok":
+			rt.HasCompressOK = true
+			rt.CompressOK, err = strconv.ParseBool(val)
+			if err != nil {
+				return nil, ResumeTokenParsingError
+			}
 		}
 	}
 
@@ -268,29 +282,4 @@ func (t *ResumeToken) ToNameSplit() (fs *DatasetPath, snapName string, err error
 		return nil, "", errors.Wrap(err, "resume token field `toname` dataset path invalid")
 	}
 	return dp, comps[1], nil
-}
-
-// Validate that the expected values are encoded in the token.
-// If invalid, the error contains a meaningful description, including the expected value
-func (t *ResumeToken) ValidateCorrespondsToSend(expFS string, expHasFromGUID bool, expFromGUID, expToGUID uint64) error {
-	tokenFS, _, err := t.ToNameSplit()
-	if err != nil {
-		return err
-	}
-	if expFS != tokenFS.ToString() {
-		return fmt.Errorf("field `toname` filesystem does not match expected value: %q != %q", tokenFS, expFS)
-	}
-	if expHasFromGUID != t.HasFromGUID {
-		return fmt.Errorf("resume token is expected to have a `fromguid`")
-	}
-	if expFromGUID != t.FromGUID {
-		return fmt.Errorf("resume token `fromguid` does not match expected value: %q != %q", expFromGUID, t.FromGUID)
-	}
-	if !t.HasToGUID {
-		return fmt.Errorf("resume token is expected to have a `toguid`")
-	}
-	if expToGUID != t.ToGUID {
-		return fmt.Errorf("resume token `toguid` does not match expected value: %q != %q", expFromGUID, t.ToGUID)
-	}
-	return nil
 }

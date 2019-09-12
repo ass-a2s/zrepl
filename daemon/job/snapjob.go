@@ -162,7 +162,10 @@ func (h alwaysUpToDateReplicationCursorHistory) ListFilesystems(ctx context.Cont
 func (j *SnapJob) doPrune(ctx context.Context) {
 	log := GetLogger(ctx)
 	ctx = logging.WithSubsystemLoggers(ctx, log)
-	sender := endpoint.NewSender(j.fsfilter)
+	sender := endpoint.NewSender(endpoint.SenderConfig{
+		FSF:     j.fsfilter,
+		Encrypt: true, // FIXME this is irrelevant because endpoint is only used as a pruner.Target
+	})
 	j.pruner = j.prunerFactory.BuildLocalPruner(ctx, sender, alwaysUpToDateReplicationCursorHistory{sender})
 	log.Info("start pruning")
 	j.pruner.Prune()

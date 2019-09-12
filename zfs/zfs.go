@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"context"
 	"regexp"
 	"strconv"
@@ -294,17 +296,6 @@ func ZFSListChan(ctx context.Context, out chan ZFSListResult, properties []strin
 	}
 }
 
-func validateRelativeZFSVersion(s string) error {
-	if len(s) <= 1 {
-		return errors.New("version must start with a delimiter char followed by at least one character")
-	}
-	if !(s[0] == '#' || s[0] == '@') {
-		return errors.New("version name starts with invalid delimiter char")
-	}
-	// FIXME whitespace check...
-	return nil
-}
-
 func validateZFSFilesystem(fs string) error {
 	if len(fs) < 1 {
 		return errors.New("filesystem path must have length > 0")
@@ -312,31 +303,40 @@ func validateZFSFilesystem(fs string) error {
 	return nil
 }
 
-func absVersion(fs, v string) (full string, err error) {
+// v must not be nil and be already validated
+func absVersion(fs string, v *ZFSSendArgVersion) (full string, err error) {
 	if err := validateZFSFilesystem(fs); err != nil {
 		return "", err
 	}
-	if err := validateRelativeZFSVersion(v); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s%s", fs, v), nil
+	return fmt.Sprintf("%s%s", fs, v.RelName), nil
 }
 
-func buildCommonSendArgs(fs string, from, to string, token string) ([]string, error) {
+// tok is allowed to be nil
+// a must already be validated
+//
+// SECURITY SENSITIVE because Raw must be handled correctly
+func (a ZFSSendArgs) buildCommonSendArgs() ([]string, error) {
+
 	args := make([]string, 0, 3)
-	if token != "" {
-		args = append(args, "-t", token)
+	// ResumeToken takes precedence, we assume that it has been validated to reflect
+	// what is described by the other fields in ZFSSendArgs
+	if a.ResumeToken != "" {
+		args = append(args, "-t", a.ResumeToken)
 		return args, nil
 	}
 
-	toV, err := absVersion(fs, to)
+	if a.Encrypted.B {
+		args = append(args, "-w")
+	}
+
+	toV, err := absVersion(a.FS, a.To)
 	if err != nil {
 		return nil, err
 	}
 
 	fromV := ""
-	if from != "" {
-		fromV, err = absVersion(fs, from)
+	if a.From != nil {
+		fromV, err = absVersion(a.FS, a.From)
 		if err != nil {
 			return nil, err
 		}
@@ -519,15 +519,196 @@ func (s *sendStream) killAndWait(precedingReadErr error) error {
 	return s.opErr
 }
 
+// NOTE: When updating this struct, make sure to update funcs Validate ValidateCorrespondsToResumeToken
+
+type ZFSSendArgVersion struct {
+	RelName string
+	GUID    uint64
+}
+
+// fs must be not empty
+func (a ZFSSendArgVersion) Validate(ctx context.Context, fs string) error {
+	if len(a.RelName) == 0 {
+		return errors.New("`RelName` must not be empty")
+	}
+	if strings.IndexAny(a.RelName[0:1], "@#") != 0 {
+		return fmt.Errorf("`RelName` field must start with @ or #, got %q", a.RelName)
+	}
+
+	if fs == "" {
+		panic(fs)
+	}
+
+	realGUID, err := ZFSGetGUID(fs, a.RelName)
+	if err != nil {
+		if _, ok := err.(*DatasetDoesNotExist); ok {
+			// fallthrough
+			// TODO is this ok
+		} else {
+			return err
+		}
+		// fallthrough
+	}
+
+	if realGUID != a.GUID {
+		return fmt.Errorf("`GUID` field does not match real dataset's GUID: %q != %q", realGUID, a.GUID)
+	}
+
+	return nil
+}
+
+type NilBool struct{ B bool }
+
+func (n *NilBool) Validate() error {
+	if n == nil {
+		return fmt.Errorf("must explicitly set `true` or `false`")
+	}
+	return nil
+}
+
+func (n *NilBool) String() string {
+	if n == nil {
+		return "unset"
+	}
+	return fmt.Sprintf("%v", n.B)
+}
+
+// When updating this struct, check Validate and ValidateCorrespondsToResumeToken (Potentiall SECURITY SENSITIVE)
+type ZFSSendArgs struct {
+	FS        string
+	From, To  *ZFSSendArgVersion // From may be nil
+	Encrypted *NilBool
+
+	// Prefereed if not empty
+	ResumeToken string // if not nil, must match what is specified in From, To (covered by ValidateCorrespondsToResumeToken)
+}
+
+type zfsSendArgsValidationContext struct {
+	encEnabled *NilBool
+}
+
+// - Recursively call Validate on each field.
+// - Make sure that if ResumeToken != "", it reflects the same operation as the other paramters would.
+//
+// This function is not pure because GUIDs are checked against the local host's datasets.
+func (a ZFSSendArgs) Validate(ctx context.Context) error {
+	if dp, err := NewDatasetPath(a.FS); err != nil || dp.Length() == 0 {
+		return fmt.Errorf("`FS` must be a valid non-zero dataset path")
+	}
+
+	if a.To == nil {
+		return errors.New("`To` must not be nil")
+	}
+	if err := a.To.Validate(ctx, a.FS); err != nil {
+		return errors.Wrap(err, "`To` invalid")
+	}
+
+	if a.From != nil {
+		if err := a.From.Validate(ctx, a.FS); err != nil {
+			return errors.Wrap(err, "`From` invalid")
+		}
+		// falthrough
+	}
+
+	if err := a.Encrypted.Validate(); err != nil {
+		return errors.Wrap(err, "`Raw` invalid")
+	}
+
+	valCtx := &zfsSendArgsValidationContext{}
+	fsEncrypted, err := ZFSGetEncryptionEnabled(ctx, a.FS)
+	if err != nil {
+		return errors.Wrapf(err, "cannot check whether filesystem %q is encrypted", a.FS)
+	}
+	valCtx.encEnabled = &NilBool{fsEncrypted}
+
+	if a.Encrypted.B && !fsEncrypted {
+		return fmt.Errorf("encrypted send requested, but filesystem %q is not encrypted", a.FS)
+	}
+
+	if a.ResumeToken != "" {
+		if err := a.validateCorrespondsToResumeToken(ctx, valCtx); err != nil {
+			return err // do not wrap, type is part of method signature
+		}
+	}
+
+	return nil
+}
+
+// This is SECURITY SENSITIVE and requires exhaustive checking of both side's values
+// An attacker requesting a Send with a crafted ResumeToken may encode different parameters in the resume token than expected:
+// for example, they may specify another file system (e.g. the filesystem with secret data) or request unencrypted send instead of encrypted raw send.
+func (a ZFSSendArgs) validateCorrespondsToResumeToken(ctx context.Context, valCtx *zfsSendArgsValidationContext) error {
+
+	if a.ResumeToken == "" {
+		return nil // nothing to do
+	}
+
+	debug("decoding resume token %q")
+	t, err := ParseResumeToken(ctx, a.ResumeToken)
+	debug("decode resumee token result: %#v %T %v", t, err, err)
+	if err != nil {
+		return err
+	}
+
+	tokenFS, _, err := t.ToNameSplit()
+	if err != nil {
+		return err
+	}
+
+	if a.FS != tokenFS.ToString() {
+		return fmt.Errorf("filesystem in resume token field `toname` = %q does not match expected value %q", tokenFS, a.FS)
+	}
+
+	if (a.From != nil) != t.HasFromGUID { // existence must be same
+		if t.HasFromGUID {
+			return fmt.Errorf("resume token not expected to be incremental, but `fromguid` = %q", t.FromGUID)
+		} else {
+			return fmt.Errorf("resume token expected to be incremental, but `fromguid` not present")
+		}
+	} else if t.HasFromGUID { // if exists (which is same, we checked above), they must match
+		if t.FromGUID != a.From.GUID {
+			return fmt.Errorf("resume token `fromguid` != expected: %q != %q", t.FromGUID, a.From.GUID)
+		}
+	} else {
+		// both empty, ok
+	}
+
+	// To must never be empty
+	if !t.HasToGUID {
+		return fmt.Errorf("resume token does not have `toguid`")
+	}
+	if t.ToGUID != a.To.GUID { // a.To != nil because Validate checks for that
+		return fmt.Errorf("resume token `toguid` != expected: %q != %q", t.ToGUID, a.To.GUID)
+	}
+
+	if a.Encrypted.B {
+		if !(t.RawOK && t.CompressOK) {
+			return fmt.Errorf("resume token must have `rawok` and `compressok` = true but got %q %q", t.RawOK, t.CompressOK)
+		}
+		// fallthrough
+	} else {
+		if t.RawOK || t.CompressOK {
+			return fmt.Errorf("resume token must not have `rawok` or `compressok` set but got %q %q", t.RawOK, t.CompressOK)
+		}
+		// fallthrough
+	}
+
+	return nil
+}
+
 // if token != "", then send -t token is used
 // otherwise send [-i from] to is used
 // (if from is "" a full ZFS send is done)
-func ZFSSend(ctx context.Context, fs string, from, to string, token string) (streamCopier StreamCopier, err error) {
+func ZFSSend(ctx context.Context, sendArgs ZFSSendArgs) (streamCopier StreamCopier, err error) {
 
 	args := make([]string, 0)
 	args = append(args, "send")
 
-	sargs, err := buildCommonSendArgs(fs, from, to, token)
+	if err := sendArgs.Validate(ctx); err != nil {
+		return nil, errors.Wrap(err, "cannot validate send args")
+	}
+
+	sargs, err := sendArgs.buildCommonSendArgs()
 	if err != nil {
 		return nil, err
 	}
@@ -653,26 +834,30 @@ func (s *DrySendInfo) unmarshalInfoLine(l string) (regexMatched bool, err error)
 
 // to may be "", in which case a full ZFS send is done
 // May return BookmarkSizeEstimationNotSupported as err if from is a bookmark.
-func ZFSSendDry(fs string, from, to string, token string) (_ *DrySendInfo, err error) {
+func ZFSSendDry(ctx context.Context, sendArgs ZFSSendArgs) (_ *DrySendInfo, err error) {
 
-	if strings.Contains(from, "#") {
+	if err := sendArgs.Validate(ctx); err != nil {
+		return nil, errors.Wrap(err, "cannot validate send args")
+	}
+
+	if sendArgs.From != nil && strings.Contains(sendArgs.From.RelName, "#") {
 		/* TODO:
 		 * ZFS at the time of writing does not support dry-run send because size-estimation
 		 * uses fromSnap's deadlist. However, for a bookmark, that deadlist no longer exists.
 		 * Redacted send & recv will bring this functionality, see
 		 * 	https://github.com/openzfs/openzfs/pull/484
 		 */
-		fromAbs, err := absVersion(fs, from)
+		fromAbs, err := absVersion(sendArgs.FS, sendArgs.From)
 		if err != nil {
 			return nil, fmt.Errorf("error building abs version for 'from': %s", err)
 		}
-		toAbs, err := absVersion(fs, to)
+		toAbs, err := absVersion(sendArgs.FS, sendArgs.To)
 		if err != nil {
 			return nil, fmt.Errorf("error building abs version for 'to': %s", err)
 		}
 		return &DrySendInfo{
 			Type:         DrySendTypeIncremental,
-			Filesystem:   fs,
+			Filesystem:   sendArgs.FS,
 			From:         fromAbs,
 			To:           toAbs,
 			SizeEstimate: -1}, nil
@@ -680,7 +865,7 @@ func ZFSSendDry(fs string, from, to string, token string) (_ *DrySendInfo, err e
 
 	args := make([]string, 0)
 	args = append(args, "send", "-n", "-v", "-P")
-	sargs, err := buildCommonSendArgs(fs, from, to, token)
+	sargs, err := sendArgs.buildCommonSendArgs()
 	if err != nil {
 		return nil, err
 	}
@@ -689,7 +874,7 @@ func ZFSSendDry(fs string, from, to string, token string) (_ *DrySendInfo, err e
 	cmd := exec.Command(ZFS_BINARY, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, &ZFSError{output, err}
 	}
 	var si DrySendInfo
 	if err := si.unmarshalZFSOutput(output); err != nil {
@@ -945,8 +1130,8 @@ func ZFSGetGUID(fs string, version string) (g uint64, err error) {
 			*e = fmt.Errorf("zfs get guid fs=%q version=%q: %s", fs, version, *e)
 		}
 	}(&err)
-	if len(fs) == 0 {
-		return 0, errors.New("fs must have non-zero length")
+	if err := validateZFSFilesystem(fs); err != nil {
+		return 0, err
 	}
 	if len(version) == 0 {
 		return 0, errors.New("version must have non-zero length")

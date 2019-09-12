@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"strings"
 
 	"github.com/pkg/errors"
 
@@ -17,13 +16,19 @@ import (
 	"github.com/zrepl/zrepl/zfs"
 )
 
+type SenderConfig struct {
+	FSF     zfs.DatasetFilter
+	Encrypt bool
+}
+
 // Sender implements replication.ReplicationEndpoint for a sending side
 type Sender struct {
 	FSFilter zfs.DatasetFilter
+	encrypt  bool
 }
 
-func NewSender(fsf zfs.DatasetFilter) *Sender {
-	return &Sender{FSFilter: fsf}
+func NewSender(conf SenderConfig) *Sender {
+	return &Sender{FSFilter: conf.FSF, encrypt: conf.Encrypt}
 }
 
 func (s *Sender) filterCheckFS(fs string) (*zfs.DatasetPath, error) {
@@ -51,10 +56,15 @@ func (s *Sender) ListFilesystems(ctx context.Context, r *pdu.ListFilesystemReq) 
 	}
 	rfss := make([]*pdu.Filesystem, len(fss))
 	for i := range fss {
+		encEnabled, err := zfs.ZFSGetEncryptionEnabled(ctx, fss[i].ToString())
+		if err != nil {
+			return nil, errors.Wrap(err, "cannot get filesystem encryption status")
+		}
 		rfss[i] = &pdu.Filesystem{
 			Path: fss[i].ToString(),
 			// ResumeToken does not make sense from Sender
 			IsPlaceholder: false, // sender FSs are never placeholders
+			IsEncrypted:   encEnabled,
 		}
 	}
 	res := &pdu.ListFilesystemRes{Filesystems: rfss}
@@ -83,87 +93,39 @@ var maxConcurrentZFSSendSemaphore = semaphore.New(envconst.Int64("ZREPL_ENDPOINT
 
 func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.StreamCopier, error) {
 
-	if r.Filesystem == "" {
-		return nil, nil, errors.New("`Filesystems` field in SendReq must not be empty")
-	}
-	if r.To == "" {
-		return nil, nil, errors.New("`To` field in SendReq must not be empty")
-	}
-	if strings.IndexAny(r.To[0:1], "@#") != 0 {
-		return nil, nil, errors.New("`To` field in SendReq must start with @ or #")
-	}
-	// r.From may be empty for full send
-	if r.From != "" && strings.IndexAny(r.From[0:1], "@#") != 0 {
-		return nil, nil, errors.New("`From` field in SendReq must start with @ or #")
-	}
-
 	_, err := s.filterCheckFS(r.Filesystem)
 	if err != nil {
 		return nil, nil, err
 	}
+	switch r.Encrypted {
+	case pdu.Tri_DontCare:
+		// ok, fallthrough outer FIXME
+	case pdu.Tri_False:
+		if s.encrypt {
+			return nil, nil, errors.New("only encrytped sends allowed (send -w + encryption!= off), but unencrytped send requested")
+		}
+		// fallthrough outer
+	case pdu.Tri_True:
+		if !s.encrypt {
+			return nil, nil, errors.New("only unencrypted sends allowed, but encrypted send requested")
+		}
+		// fallthrough outer
+	default:
+		return nil, nil, fmt.Errorf("unknown pdu.Tri variant %q", r.Encrypted)
+	}
 
-	type rtValErr struct{ error }
-	type rtNotSupported struct{ error }
-	validateResumeToken := func() error {
-		if r.ResumeToken == "" {
+	sendArgsVersionFromPDU := func(fsv *pdu.FilesystemVersion) *zfs.ZFSSendArgVersion {
+		if fsv == nil {
 			return nil
 		}
-		resumeSupported, err := zfs.ResumeSendSupported()
-		if err != nil {
-			return errors.Wrap(err, "check for resume send support failed")
-		}
-		if !resumeSupported {
-			return rtNotSupported{fmt.Errorf("resumable send not supported")}
-		}
-
-		token, err := zfs.ParseResumeToken(ctx, r.ResumeToken)
-		switch {
-		case err == zfs.ResumeTokenDecodingNotSupported || err == zfs.ResumeTokenParsingError:
-			return rtNotSupported{err} // might be error on our side, be conservative and mark token unsupported
-		case err == zfs.ResumeTokenCorruptError:
-			return err // hard error by sender
-		case err != nil:
-			return errors.Wrap(err, "resume token decoding failed") // hard error by either side, be conservative
-		default:
-			// fallthrough
-		}
-		getLogger(ctx).WithField("resume token", fmt.Sprintf("%#v", token)).Debug("decoded resume token")
-		expToGUID, err := zfs.ZFSGetGUID(r.Filesystem, r.To)
-		if err != nil {
-			return err
-		}
-		var (
-			expFromGUID    uint64
-			expHasFromGUID bool
-		)
-		if r.From != "" {
-			expHasFromGUID = true
-			expFromGUID, err = zfs.ZFSGetGUID(r.Filesystem, r.From)
-			if err != nil {
-				return err
-			}
-		}
-		if err := token.ValidateCorrespondsToSend(r.Filesystem, expHasFromGUID, expFromGUID, expToGUID); err != nil {
-			return rtValErr{errors.Wrap(err, "resume token does not correspond to request send")}
-		}
-		return nil
+		return &zfs.ZFSSendArgVersion{RelName: fsv.RelName(), GUID: fsv.Guid}
 	}
-	err = validateResumeToken()
-	useResumeToken := ""
-	switch err := err.(type) {
-	case rtValErr:
-		getLogger(ctx).WithError(err.error).Error("token determined to be invalid, possible attack by peer")
-		return nil, nil, err.error
-	case rtNotSupported:
-		getLogger(ctx).WithError(err.error).Info("resume requested but not supported sender side, requesting discard and sending stream from beginning")
-		useResumeToken = "" // shadow
-		// fallthrough
-	case nil:
-		useResumeToken = r.ResumeToken
-		// fallthrough
-	default:
-		getLogger(ctx).WithError(err).Error("resume token validation could not be completed")
-		return nil, nil, err
+	sendArgs := zfs.ZFSSendArgs{
+		FS:          r.Filesystem,
+		From:        sendArgsVersionFromPDU(r.From),
+		To:          sendArgsVersionFromPDU(r.To),
+		Encrypted:   &zfs.NilBool{B: s.encrypt},
+		ResumeToken: r.ResumeToken, // nil or not nil, depending on decoding success
 	}
 
 	getLogger(ctx).Debug("acquire concurrent send semaphore")
@@ -176,9 +138,9 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.St
 	}
 	defer guard.Release()
 
-	si, err := zfs.ZFSSendDry(r.Filesystem, r.From, r.To, useResumeToken)
+	si, err := zfs.ZFSSendDry(ctx, sendArgs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "zfs send dry failed")
 	}
 
 	var expSize int64 = 0      // protocol says 0 means no estimate
@@ -187,16 +149,16 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.St
 	}
 	res := &pdu.SendRes{
 		ExpectedSize:    expSize,
-		UsedResumeToken: useResumeToken != "",
+		UsedResumeToken: r.ResumeToken != "",
 	}
 
 	if r.DryRun {
 		return res, nil, nil
 	}
 
-	streamCopier, err := zfs.ZFSSend(ctx, r.Filesystem, r.From, r.To, useResumeToken)
+	streamCopier, err := zfs.ZFSSend(ctx, sendArgs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "zfs send failed")
 	}
 	return res, streamCopier, nil
 }
@@ -371,13 +333,21 @@ func (s *Receiver) ListFilesystems(ctx context.Context, req *pdu.ListFilesystemR
 			l.WithError(err).Error("cannot get receive resume token")
 			return nil, err
 		}
+		encEnabled, err := zfs.ZFSGetEncryptionEnabled(ctx, a.ToString())
+		if err != nil {
+			l.WithError(err).Error("cannot get encryption enabled status")
+			return nil, err
+		}
 		l.WithField("receive_resume_token", token).Debug("receive resume token")
 		fmt.Fprintf(os.Stderr, "FIXME LOGGING NOT WORKING HERE: receive_resume_token = %q\n", token)
+
 		a.TrimPrefix(root)
+
 		fs := &pdu.Filesystem{
 			Path:          a.ToString(),
 			IsPlaceholder: ph.IsPlaceholder,
 			ResumeToken:   token,
+			IsEncrypted:   encEnabled,
 		}
 		fss = append(fss, fs)
 	}

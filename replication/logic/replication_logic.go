@@ -48,9 +48,14 @@ type Receiver interface {
 	Receive(ctx context.Context, req *pdu.ReceiveReq, receive zfs.StreamCopier) (*pdu.ReceiveRes, error)
 }
 
+type PlannerPolicy struct {
+	EncryptedSend tri // all sends must be encrypted (send -w, and encryption!=off)
+}
+
 type Planner struct {
 	sender   Sender
 	receiver Receiver
+	policy   PlannerPolicy
 
 	promSecsPerState    *prometheus.HistogramVec // labels: state
 	promBytesReplicated *prometheus.CounterVec   // labels: filesystem
@@ -109,10 +114,11 @@ func (p *Planner) WaitForConnectivity(ctx context.Context) error {
 type Filesystem struct {
 	sender   Sender
 	receiver Receiver
+	policy   PlannerPolicy
 
-	Path                string // compat
-	receiverFS          *pdu.Filesystem
-	promBytesReplicated prometheus.Counter // compat
+	Path                 string             // compat
+	receiverFS, senderFS *pdu.Filesystem    // receiverFS may be nil, senderFS never nil
+	promBytesReplicated  prometheus.Counter // compat
 
 	// empty string means receiver did not present a resume token
 	resumeTokenRaw string
@@ -152,7 +158,8 @@ type Step struct {
 
 	parent      *Filesystem
 	from, to    *pdu.FilesystemVersion // from may be nil, indicating full send
-	resumeToken string                 // empty means no resume token shall be used
+	encrypt     tri
+	resumeToken string // empty means no resume token shall be used
 
 	expectedSize int64 // 0 means no size estimate present / possible
 
@@ -196,19 +203,32 @@ func (s *Step) ReportInfo() *report.StepInfo {
 	if s.from != nil {
 		from = s.from.RelName()
 	}
+	var encrypted report.EncryptedEnum
+	switch s.encrypt {
+	case DontCare:
+		encrypted = report.EncryptedSenderDependent
+	case True:
+		encrypted = report.EncryptedTrue
+	case False:
+		encrypted = report.EncryptedFalse
+	default:
+		panic(fmt.Sprintf("unknown variant %s", s.encrypt))
+	}
 	return &report.StepInfo{
 		From:            from,
 		To:              s.to.RelName(),
 		Resumed:         s.resumeToken != "",
+		Encrypted:       encrypted,
 		BytesExpected:   s.expectedSize,
 		BytesReplicated: byteCounter,
 	}
 }
 
-func NewPlanner(secsPerState *prometheus.HistogramVec, bytesReplicated *prometheus.CounterVec, sender Sender, receiver Receiver) *Planner {
+func NewPlanner(secsPerState *prometheus.HistogramVec, bytesReplicated *prometheus.CounterVec, sender Sender, receiver Receiver, policy PlannerPolicy) *Planner {
 	return &Planner{
 		sender:              sender,
 		receiver:            receiver,
+		policy:              policy,
 		promSecsPerState:    secsPerState,
 		promBytesReplicated: bytesReplicated,
 	}
@@ -265,29 +285,16 @@ func (p *Planner) doPlanning(ctx context.Context) ([]*Filesystem, error) {
 				receiverFS = rfs
 			}
 		}
-		// receiverFS may be nil!
 
 		ctr := p.promBytesReplicated.WithLabelValues(fs.Path)
-
-		var resumeTokenDecoded *zfs.ResumeToken
-		var resumeTokenRaw string
-		if receiverFS != nil && receiverFS.ResumeToken != "" {
-			log.WithField("receiverFS.ResumeToken", receiverFS.ResumeToken).Debug("receiver fs resume token")
-			resumeTokenDecoded, err = zfs.ParseResumeToken(ctx, receiverFS.ResumeToken) // shadow
-			if err != nil {
-				log.WithError(err).Error("cannot decode resume token")
-				return nil, err
-			}
-			resumeTokenRaw = receiverFS.ResumeToken
-		}
 
 		q = append(q, &Filesystem{
 			sender:                 p.sender,
 			receiver:               p.receiver,
+			policy:                 p.policy,
 			Path:                   fs.Path,
+			senderFS:               fs,
 			receiverFS:             receiverFS,
-			resumeTokenRaw:         resumeTokenRaw,
-			resumeToken:            resumeTokenDecoded,
 			promBytesReplicated:    ctr,
 			sizeEstimateRequestSem: sizeEstimateRequestSem,
 		})
@@ -301,6 +308,10 @@ func (fs *Filesystem) doPlanning(ctx context.Context) ([]*Step, error) {
 	log := getLogger(ctx).WithField("filesystem", fs.Path)
 
 	log.Debug("assessing filesystem")
+
+	if fs.policy.EncryptedSend == True && !fs.senderFS.GetIsEncrypted() {
+		return nil, fmt.Errorf("sender filesystem is not encrypted but policy mandates encrypted send")
+	}
 
 	sfsvsres, err := fs.sender.ListFilesystemVersions(ctx, &pdu.ListFilesystemVersionsReq{Filesystem: fs.Path})
 	if err != nil {
@@ -327,62 +338,160 @@ func (fs *Filesystem) doPlanning(ctx context.Context) ([]*Step, error) {
 		rfsvs = []*pdu.FilesystemVersion{}
 	}
 
-	path, conflict := IncrementalPath(rfsvs, sfsvs)
-	if conflict != nil {
-		var msg string
-		path, msg = resolveConflict(conflict) // no shadowing allowed!
-		if path != nil {
-			log.WithField("conflict", conflict).Info("conflict")
-			log.WithField("resolution", msg).Info("automatically resolved")
-		} else {
-			log.WithField("conflict", conflict).Error("conflict")
-			log.WithField("problem", msg).Error("cannot resolve conflict")
+	var resumeToken *zfs.ResumeToken
+	var resumeTokenRaw string
+	if fs.receiverFS != nil && fs.receiverFS.ResumeToken != "" {
+		resumeTokenRaw = fs.receiverFS.ResumeToken // shadow
+		log.WithField("receiverFS.ResumeToken", resumeTokenRaw).Debug("decode receiver fs resume token")
+		resumeToken, err = zfs.ParseResumeToken(ctx, resumeTokenRaw) // shadow
+		if err != nil {
+			// TODO in theory, we could do replication without resume token, but that would mean that
+			// we need to discard the resumable state on the receiver's side.
+			// Would be easy by setting UsedResumeToken=false in the RecvReq ...
+			// FIXME / CHECK semantics UsedResumeToken if SendReq.ResumeToken == ""
+			log.WithError(err).Error("cannot decode resume token, aborting")
+			return nil, err
 		}
-	}
-	if len(path) == 0 {
-		return nil, conflict
+		log.WithField("token", resumeToken).Debug("decode resume token")
 	}
 
-	steps := make([]*Step, 0, len(path))
-	// FIXME unify struct declarations => initializer?
-	if len(path) == 1 {
-		steps = append(steps, &Step{
+	var steps []*Step
+	// build the list of replication steps
+	//
+	// prefer to resume any started replication instead of starting over with a normal IncrementalPath
+	//
+	// look for the step encoded in the resume token in the sender's version
+	// if we find that step:
+	//   1. use it as first step (including resume token)
+	//   2. compute subsequent steps by computing incremental path from the token.To version on
+	//      ...
+	//      that's actually equivalent to simply cutting off earlier versions from rfsvs and sfsvs
+	if resumeToken != nil {
+
+		sfsvs := SortVersionListByCreateTXGThenBookmarkLTSnapshot(sfsvs)
+
+		var fromVersion, toVersion *pdu.FilesystemVersion
+		var toVersionIdx int
+		for idx, sfsv := range sfsvs {
+			if resumeToken.HasFromGUID && sfsv.Guid == resumeToken.FromGUID {
+				if fromVersion != nil && fromVersion.Type == pdu.FilesystemVersion_Snapshot {
+					// prefer snapshots over bookmarks for size estimation
+				} else {
+					fromVersion = sfsv
+				}
+			}
+			if resumeToken.HasToGUID && sfsv.Guid == resumeToken.ToGUID && sfsv.Type == pdu.FilesystemVersion_Snapshot {
+				// `toversion` must always be a snapshot
+				toVersion, toVersionIdx = sfsv, idx
+			}
+		}
+
+		encryptionMatches := false
+		switch fs.policy.EncryptedSend {
+		case True:
+			encryptionMatches = resumeToken.RawOK && resumeToken.CompressOK
+		case False:
+			encryptionMatches = !resumeToken.RawOK && !resumeToken.CompressOK
+		case DontCare:
+			encryptionMatches = true
+		}
+
+		log.WithField("fromVersion", fromVersion).
+			WithField("toVersion", toVersion).
+			WithField("encryptionMatches", encryptionMatches).
+			Debug("result of resume-token-matching to sender's versions")
+
+		if !encryptionMatches {
+			return nil, fmt.Errorf("resume token `rawok`=%v and `compressok`=%v are incompatible with encryption policy=%v", resumeToken.RawOK, resumeToken.CompressOK, fs.policy.EncryptedSend)
+		} else if toVersion == nil {
+			return nil, fmt.Errorf("resume token `toguid` = %q not found on sender", resumeToken.ToGUID)
+		} else if fromVersion == toVersion {
+			return nil, fmt.Errorf("resume token `fromguid` and `toguid` match same version on sener")
+		}
+		// fromVersion may be nil, toVersion is no nil, encryption matches
+		// good to go this one step!
+		resumeStep := &Step{
 			parent:   fs,
 			sender:   fs.sender,
 			receiver: fs.receiver,
-			from:     nil,
-			to:       path[0],
-		})
-	} else {
-		for i := 0; i < len(path)-1; i++ {
+
+			from:    fromVersion,
+			to:      toVersion,
+			encrypt: fs.policy.EncryptedSend,
+
+			resumeToken: resumeTokenRaw,
+		}
+
+		// by definition, the resume token _must_ be the receiver's most recent version, if they have any
+		// don't bother checking, zfs recv will produce an error if above assumption is wrong
+		//
+		// thus, subsequent steps are just incrementals on the sender's remaining _snapshots_ (not bookmarks)
+
+		var remainingSFSVs []*pdu.FilesystemVersion
+		for _, sfsv := range sfsvs[toVersionIdx:] {
+			if sfsv.Type == pdu.FilesystemVersion_Snapshot {
+				remainingSFSVs = append(remainingSFSVs, sfsv)
+			}
+		}
+
+		steps = make([]*Step, 0, len(remainingSFSVs)) // shadow
+		steps = append(steps, resumeStep)
+		for i := 0; i < len(remainingSFSVs)-1; i++ {
 			steps = append(steps, &Step{
 				parent:   fs,
 				sender:   fs.sender,
 				receiver: fs.receiver,
-				from:     path[i],
-				to:       path[i+1],
+				from:     remainingSFSVs[i],
+				to:       remainingSFSVs[i+1],
+				encrypt:  fs.policy.EncryptedSend,
 			})
+		}
+		// TODO do something with steps
+	} else { // resumeToken == nil
+		path, conflict := IncrementalPath(rfsvs, sfsvs)
+		if conflict != nil {
+			var msg string
+			path, msg = resolveConflict(conflict) // no shadowing allowed!
+			if path != nil {
+				log.WithField("conflict", conflict).Info("conflict")
+				log.WithField("resolution", msg).Info("automatically resolved")
+			} else {
+				log.WithField("conflict", conflict).Error("conflict")
+				log.WithField("problem", msg).Error("cannot resolve conflict")
+			}
+		}
+		if len(path) == 0 {
+			return nil, conflict
+		}
+
+		steps = make([]*Step, 0, len(path)) // shadow
+		if len(path) == 1 {
+			steps = append(steps, &Step{
+				parent:   fs,
+				sender:   fs.sender,
+				receiver: fs.receiver,
+
+				from:    nil,
+				to:      path[0],
+				encrypt: fs.policy.EncryptedSend,
+			})
+		} else {
+			for i := 0; i < len(path)-1; i++ {
+				steps = append(steps, &Step{
+					parent:   fs,
+					sender:   fs.sender,
+					receiver: fs.receiver,
+
+					from:    path[i],
+					to:      path[i+1],
+					encrypt: fs.policy.EncryptedSend,
+				})
+			}
 		}
 	}
 
-	// inspect first step to determine whether we can use the resume token
-	// if the first step is something different than what the resume token started, discard it
-	if fs.resumeToken != nil {
-		toGuidsMatch := steps[0].to.Guid == fs.resumeToken.ToGUID
-		hasFromGuidsMatch := steps[0].from != nil == fs.resumeToken.HasFromGUID
-		// use shortcircuiting
-		fromGuidsMatch := hasFromGuidsMatch &&
-			(steps[0].from == nil || steps[0].from.Guid == fs.resumeToken.FromGUID)
-		// FIXME we have very similar logic in the receiver (it also validates ToName though, which we can't if this code doesn't run on the sender, i.e. can't do it in pull mode)
-		log.WithField("toGuidsMatch", toGuidsMatch).WithField("fromGuidsMatch", fromGuidsMatch).
-			WithField("fs.ResumeToken", fmt.Sprintf("%#v", fs.resumeToken)).
-			WithField("steps[0]", fmt.Sprintf("%#v", steps[0])).
-			Debug("resume token eligibilty check")
-		if toGuidsMatch && fromGuidsMatch {
-			steps[0].resumeToken = fs.resumeTokenRaw
-		} else {
-			steps[0].resumeToken = ""
-		}
+	if len(steps) == 0 {
+		log.Info("planning determined that no replication steps are required")
 	}
 
 	log.Debug("compute send size estimate")
@@ -474,17 +583,19 @@ func (s *Step) buildSendRequest(dryRun bool) (sr *pdu.SendReq) {
 	if s.from == nil {
 		sr = &pdu.SendReq{
 			Filesystem:  fs,
-			To:          s.to.RelName(),
-			DryRun:      dryRun,
+			To:          s.to,
+			Encrypted:   s.encrypt.ToPDU(),
 			ResumeToken: s.resumeToken,
+			DryRun:      dryRun,
 		}
 	} else {
 		sr = &pdu.SendReq{
 			Filesystem:  fs,
-			From:        s.from.RelName(),
-			To:          s.to.RelName(),
-			DryRun:      dryRun,
+			From:        s.from,
+			To:          s.to,
+			Encrypted:   s.encrypt.ToPDU(),
 			ResumeToken: s.resumeToken,
+			DryRun:      dryRun,
 		}
 	}
 	return sr

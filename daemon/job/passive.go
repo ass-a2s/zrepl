@@ -57,8 +57,8 @@ func modeSinkFromConfig(g *config.Global, in *config.SinkJob) (m *modeSink, err 
 }
 
 type modeSource struct {
-	fsfilter zfs.DatasetFilter
-	snapper  *snapper.PeriodicOrManual
+	senderConfig *endpoint.SenderConfig
+	snapper      *snapper.PeriodicOrManual
 }
 
 func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource, err error) {
@@ -68,7 +68,10 @@ func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource
 	if err != nil {
 		return nil, errors.Wrap(err, "cannnot build filesystem filter")
 	}
-	m.fsfilter = fsf
+	m.senderConfig = &endpoint.SenderConfig{
+		FSF:     fsf,
+		Encrypt: in.Send.Encrypted,
+	}
 
 	if m.snapper, err = snapper.FromConfig(g, fsf, in.Snapshotting); err != nil {
 		return nil, errors.Wrap(err, "cannot build snapper")
@@ -80,7 +83,7 @@ func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource
 func (m *modeSource) Type() Type { return TypeSource }
 
 func (m *modeSource) Handler() rpc.Handler {
-	return endpoint.NewSender(m.fsfilter)
+	return endpoint.NewSender(*m.senderConfig)
 }
 
 func (m *modeSource) RunPeriodic(ctx context.Context) {

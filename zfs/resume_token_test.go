@@ -61,6 +61,16 @@ func TestParseResumeToken(t *testing.T) {
 			Token:       `1-bf31b879a-b8-789c636064000310a500c4ec50360710e72765a5269740f80cd8e4d3d28a534b18e00024cf86249f5459925acc802a8facbf243fbd3433858161f5ddb9ab1ae7c7466a20c97382e5f312735319180af2f3730cf58166953824c2cc0200cd12345`,
 			ExpectError: zfs.ResumeTokenCorruptError,
 		},
+		{
+			Msg: "raw send full (of encrypted dataset)",
+			Token: ` 1-10a600a705-110-789c636064000310a500c4ec50360710e72765a5269740d80cd8e4d3d28a534b18e00024cf86249f5459925a0ca46b1498b1ea2fc94f2fcd4c6160b0f16f096c31bd36d503499e132c9f97989bcac05054909f9fa39f919f9baa9f5cec909b98579a98136f64606869606160116f60696861641a1f1ae28cec0e6e0684bf92f3730b8a528b8bf3b32162125077c2e48b12cb61520c00d72d24d5`,
+			ExpectToken: &zfs.ResumeToken{
+				HasToGUID: true,
+				ToGUID: 0x95d6358451844f3c,
+				ToName: "rpool/home/cs@manual_20190808_091825_UTC",
+				
+			},
+		}
 	}
 
 	for _, test := range tbl {
