@@ -404,7 +404,7 @@ func (fs *Filesystem) doPlanning(ctx context.Context) ([]*Step, error) {
 		if !encryptionMatches {
 			return nil, fmt.Errorf("resume token `rawok`=%v and `compressok`=%v are incompatible with encryption policy=%v", resumeToken.RawOK, resumeToken.CompressOK, fs.policy.EncryptedSend)
 		} else if toVersion == nil {
-			return nil, fmt.Errorf("resume token `toguid` = %q not found on sender", resumeToken.ToGUID)
+			return nil, fmt.Errorf("resume token `toguid` = %v not found on sender (`toname` = %q)", resumeToken.ToGUID, resumeToken.ToName)
 		} else if fromVersion == toVersion {
 			return nil, fmt.Errorf("resume token `fromguid` and `toguid` match same version on sener")
 		}
