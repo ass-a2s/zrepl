@@ -18,4 +18,5 @@ var Cases = []Case{
 	UndestroyableSnapshotParsing,
 	GetNonexistent,
 	ReplicationCursor,
+	RollupRelease,
 }

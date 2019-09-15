@@ -30,6 +30,7 @@ type Endpoint interface {
 	ListFilesystemVersions(ctx context.Context, req *pdu.ListFilesystemVersionsReq) (*pdu.ListFilesystemVersionsRes, error)
 	DestroySnapshots(ctx context.Context, req *pdu.DestroySnapshotsReq) (*pdu.DestroySnapshotsRes, error)
 	WaitForConnectivity(ctx context.Context) error
+	HintMostRecentCommonAncestor(context.Context, *pdu.HintMostRecentCommonAncestorReq) (*pdu.HintMostRecentCommonAncestorRes, error)
 }
 
 type Sender interface {
@@ -38,6 +39,7 @@ type Sender interface {
 	// any next call to the parent github.com/zrepl/zrepl/replication.Endpoint.
 	// If the send request is for dry run the io.ReadCloser will be nil
 	Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.StreamCopier, error)
+	SendCompleted(ctx context.Context, r *pdu.SendCompletedReq) (*pdu.SendCompletedRes, error)
 	ReplicationCursor(ctx context.Context, req *pdu.ReplicationCursorReq) (*pdu.ReplicationCursorRes, error)
 }
 
@@ -355,6 +357,36 @@ func (fs *Filesystem) doPlanning(ctx context.Context) ([]*Step, error) {
 		log.WithField("token", resumeToken).Debug("decode resume token")
 	}
 
+	// give both sides a hint about how far the replication got
+	// This serves as a cummulative variant of SendCompleted and can be useful
+	// for example to release stale holds from an earlier (interrupted) replication.
+	// TODO FIXME: enqueue this as a replication step instead of doing it here, asynchronously
+	//             then again, the step should run regardless of planning success
+	//             so maybe a separate phase before PLANNING, then?
+	path, conflict := IncrementalPath(rfsvs, sfsvs)
+	var mrca *pdu.FilesystemVersion // from sfsvs, but that shouldn't matter
+	if conflict == nil && len(path) > 0 {
+		mrca = path[0] // shadow
+	}
+	if mrca != nil {
+		doHint := func(ep Endpoint, name string) {
+			log := log.WithField("to_side", name).
+				WithField("mrca", mrca.String())
+			log.Debug("hint most recent common ancestor")
+			hint := &pdu.HintMostRecentCommonAncestorReq{
+				Version: mrca,
+			}
+			_, err := ep.HintMostRecentCommonAncestor(ctx, hint)
+			if err != nil {
+				log.WithError(err).Error("error hinting most recent common ancestor")
+			}
+		}
+		go doHint(fs.sender, "sender")
+		go doHint(fs.receiver, "receiver")
+	} else {
+		log.Debug("cannot identify most recent common ancestor, skipping hint")
+	}
+
 	var steps []*Step
 	// build the list of replication steps
 	//
@@ -580,23 +612,13 @@ func (s *Step) updateSizeEstimate(ctx context.Context) error {
 
 func (s *Step) buildSendRequest(dryRun bool) (sr *pdu.SendReq) {
 	fs := s.parent.Path
-	if s.from == nil {
-		sr = &pdu.SendReq{
-			Filesystem:  fs,
-			To:          s.to,
-			Encrypted:   s.encrypt.ToPDU(),
-			ResumeToken: s.resumeToken,
-			DryRun:      dryRun,
-		}
-	} else {
-		sr = &pdu.SendReq{
-			Filesystem:  fs,
-			From:        s.from,
-			To:          s.to,
-			Encrypted:   s.encrypt.ToPDU(),
-			ResumeToken: s.resumeToken,
-			DryRun:      dryRun,
-		}
+	sr = &pdu.SendReq{
+		Filesystem:  fs,
+		From:        s.from, // may be nil
+		To:          s.to,
+		Encrypted:   s.encrypt.ToPDU(),
+		ResumeToken: s.resumeToken,
+		DryRun:      dryRun,
 	}
 	return sr
 }
@@ -649,22 +671,13 @@ func (s *Step) doReplication(ctx context.Context) error {
 	}
 	log.Debug("receive finished")
 
-	log.Debug("advance replication cursor")
-	req := &pdu.ReplicationCursorReq{
-		Filesystem: fs,
-		Op: &pdu.ReplicationCursorReq_Set{
-			Set: &pdu.ReplicationCursorReq_SetOp{
-				Snapshot: s.to.GetName(),
-			},
-		},
-	}
-	_, err = s.sender.ReplicationCursor(ctx, req)
+	log.Debug("tell sender replication completed")
+	_, err = s.sender.SendCompleted(ctx, &pdu.SendCompletedReq{
+		CompletionTag: sres.GetCompletionTag(),
+		OriginalReq:   sr,
+	})
 	if err != nil {
-		log.WithError(err).Error("error advancing replication cursor")
-		// If this fails and replication planning restarts, the diff algorithm will find
-		// that cursor out of place. This is not a problem because then, it would just use another FS
-		// However, we FIXME have no means to just update the cursor in a
-		// second replication attempt right after this one where we don't have new snaps yet
+		log.WithError(err).Error("error telling sender that replication completed successfully")
 		return err
 	}
 

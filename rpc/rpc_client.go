@@ -116,6 +116,16 @@ func (c *Client) ReplicationCursor(ctx context.Context, in *pdu.ReplicationCurso
 	return c.controlClient.ReplicationCursor(ctx, in)
 }
 
+func (c *Client) SendCompleted(ctx context.Context, r *pdu.SendCompletedReq) (*pdu.SendCompletedRes, error) {
+	panic("not implemented")
+}
+
+
+func (c *Client)  HintMostRecentCommonAncestor(context.Context, *pdu.HintMostRecentCommonAncestorReq) (*pdu.HintMostRecentCommonAncestorRes, error) {
+	panic("not implemented")
+}
+
+
 func (c *Client) WaitForConnectivity(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

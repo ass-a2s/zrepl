@@ -143,6 +143,11 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.St
 		return nil, nil, errors.Wrap(err, "zfs send dry failed")
 	}
 
+	// From now on, assume that sendArgs has been validated by ZFSSendDry
+	// (because validation invovles shelling out, it's actually a little expensive)
+	// FIXME: track validation status in sendArgs, make it immutable?
+	sendArgsFSDP, _ := zfs.NewDatasetPath(sendArgs.FS)
+
 	var expSize int64 = 0      // protocol says 0 means no estimate
 	if si.SizeEstimate != -1 { // but si returns -1 for no size estimate
 		expSize = si.SizeEstimate
@@ -155,6 +160,22 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.St
 	if r.DryRun {
 		return res, nil, nil
 	}
+
+	// make sure incremental replication is resumable even if `From` is destroyed
+	// (if `From` is a snapshot), by bookmarking it
+	if sendArgs.From != nil && r.GetFrom().GetType() == pdu.FilesystemVersion_Snapshot {
+		// in theory, this should always be a no-op (idempotent!)
+		err := zfs.ZFSSetReplicationCursor(sendArgsFSDP, sendArgs.From.RelName, sendArgs.From.GUID)
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "cannot set replication cursor to `from` version before starting send")
+		}
+	}
+	// make sure replication is resumable by creating a hold on `To`
+	err = zfs.ZFSHold(ctx, sendArgs.FS, sendArgs.To.RelName, s.holdTag())
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "cannot hold `to` version %q before starting send", sendArgs.To.RelName)
+	}
+	// bookmark and release of hold are done in p.moveCursorAndReleaseSendHold
 
 	streamCopier, err := zfs.ZFSSend(ctx, sendArgs)
 	if err != nil {
@@ -192,25 +213,87 @@ func (p *Sender) ReplicationCursor(ctx context.Context, req *pdu.ReplicationCurs
 		return nil, err
 	}
 
-	switch op := req.Op.(type) {
-	case *pdu.ReplicationCursorReq_Get:
-		cursor, err := zfs.ZFSGetReplicationCursor(dp)
-		if err != nil {
-			return nil, err
-		}
-		if cursor == nil {
-			return &pdu.ReplicationCursorRes{Result: &pdu.ReplicationCursorRes_Notexist{Notexist: true}}, nil
-		}
-		return &pdu.ReplicationCursorRes{Result: &pdu.ReplicationCursorRes_Guid{Guid: cursor.Guid}}, nil
-	case *pdu.ReplicationCursorReq_Set:
-		guid, err := zfs.ZFSSetReplicationCursor(dp, op.Set.Snapshot)
-		if err != nil {
-			return nil, err
-		}
-		return &pdu.ReplicationCursorRes{Result: &pdu.ReplicationCursorRes_Guid{Guid: guid}}, nil
-	default:
-		return nil, errors.Errorf("unknown op %T", op)
+	cursor, err := zfs.ZFSGetReplicationCursor(dp)
+	if err != nil {
+		return nil, err
 	}
+	if cursor == nil {
+		return &pdu.ReplicationCursorRes{Result: &pdu.ReplicationCursorRes_Notexist{Notexist: true}}, nil
+	}
+	return &pdu.ReplicationCursorRes{Result: &pdu.ReplicationCursorRes_Guid{Guid: cursor.Guid}}, nil
+}
+
+func (p *Sender) HintMostRecentCommonAncestor(ctx context.Context, r *pdu.HintMostRecentCommonAncestorReq) (*pdu.HintMostRecentCommonAncestorRes, error) {
+	if r.GetFilesystem() == "" {
+		return nil, fmt.Errorf("`Filesystem` must not be empty")
+	}
+	if r.GetVersion().GetType() != pdu.FilesystemVersion_Snapshot {
+		return nil, fmt.Errorf("`Version.Type` must be a snapshot")
+	}
+	if r.GetVersion().GetName() == "" {
+		return nil, fmt.Errorf("`Version.Name` must not be empty")
+	}
+
+	// TODO clear all of the holds aquired before Send() for versions older than r.GetVersion
+
+	err := p.moveCursorAndReleaseSendHold(ctx, r.GetFilesystem(), r.GetVersion())
+	if err != nil {
+	}
+	panic("not implemented")
+
+	// return &pdu.ReplicationCursorRes{Result: &pdu.ReplicationCursorRes_Guid{Guid: guid}}, nil
+
+}
+
+func (p *Sender) SendCompleted(ctx context.Context, r *pdu.SendCompletedReq) (*pdu.SendCompletedRes, error) {
+	orig := r.GetOriginalReq() // may be nil, always use proto getters
+	err := p.moveCursorAndReleaseSendHold(ctx, orig.GetFilesystem(), orig.GetTo())
+	if err != nil {
+		return nil, err
+	}
+	return &pdu.SendCompletedRes{}, nil
+}
+
+func (p *Sender) holdTag() string {
+	panic("not implemented")
+}
+
+// mrcv = most recent common version
+func (p *Sender) moveCursorAndReleaseSendHold(ctx context.Context, fs string, mrcv *pdu.FilesystemVersion) error {
+
+	dp, err := zfs.NewDatasetPath(fs)
+	if err != nil {
+		return errors.Wrap(err, "`Filesystem` is not a valid dataset path")
+	} else if dp.Length() == 0 {
+		return fmt.Errorf("`Filesystem` must not be empty")
+	}
+	if mrcv.GetName() == "" {
+		return fmt.Errorf("`To.Name` must not be empty")
+	}
+	if mrcv.GetType() != pdu.FilesystemVersion_Snapshot {
+		return fmt.Errorf("`To.Type` must be a snapshot")
+	}
+
+	log := getLogger(ctx).WithField("guid", mrcv.GetGuid()).
+		WithField("fs", dp.ToString()).
+		WithField("mrcv", mrcv.String())
+
+	log.Debug("move replication cursor to most recent common version")
+	err = zfs.ZFSSetReplicationCursor(dp, mrcv.GetName(), mrcv.GetGuid())
+	if err != nil {
+		// it is correct to not release the hold if we can't move the cursor!
+		return errors.Wrap(err, "cannot set replication cursor")
+	}
+	log.Info("successfully moved replication cursor")
+
+	log = log.WithField("hold_tag", p.holdTag())
+	log.Debug("release holds earlier than most recent common version")
+	err = zfs.ZFSReleaseAllOlderAndIncludingGUID(ctx, dp.ToString(), mrcv.GetGuid(), p.holdTag())
+	if err != nil {
+		return errors.Wrap(err, "cannot release holds up to most recent common version")
+	}
+
+	return nil
 }
 
 func (p *Sender) Receive(ctx context.Context, r *pdu.ReceiveReq, receive zfs.StreamCopier) (*pdu.ReceiveRes, error) {
