@@ -16,15 +16,34 @@ import (
 
 // no need for feature tests, holds have been around forever
 
-// func ListAllHolds()
-
-func ZFSHold(ctx context.Context, fs, snap, tag string) error {
-	panic("not implemented")
+func validateNotEmpty(field, s string) error {
+	if s == "" {
+		return fmt.Errorf("`%s` must not be empty", field)
+	}
+	return nil
 }
 
-// if the hold doesn't exist, this is not an error
-func zfsRelease(ctx context.Context, fs, snap, tag string) error {
-	panic("not implemented")
+// Idemptotent: does not return an error if the tag already exists
+func ZFSHold(ctx context.Context, fs, snap, tag string) error {
+	if err := validateZFSFilesystem(fs); err != nil {
+		return errors.Wrap(err, "`fs` is not a valid filesystme path")
+	}
+	if err := validateNotEmpty("snap", snap); err != nil {
+		return err
+	}
+	if err := validateNotEmpty("tag", tag); err != nil {
+		return err
+	}
+	dp := fmt.Sprintf("%s@%s", fs, snap)
+	output, err := exec.CommandContext(ctx, "zfs", "hold", tag, dp).CombinedOutput()
+	if err != nil {
+		if bytes.Contains(output, []byte("tag already exists on this dataset")) {
+			goto success
+		}
+		return &ZFSError{output, errors.Wrapf(err, "cannot hold %q", dp)}
+	}
+success:
+	return nil
 }
 
 func ZFSHolds(ctx context.Context, fs, snap string) ([]string, error) {
@@ -55,7 +74,7 @@ func ZFSHolds(ctx context.Context, fs, snap string) ([]string, error) {
 	return tags, nil
 }
 
-// if the hold doesn't exist, this is not an error
+// Idempotent: if the hold doesn't exist, this is not an error
 func ZFSReleaseAllOlderAndIncludingGUID(ctx context.Context, fs string, snapGuid uint64, tag string) error {
 	// TODO channel program support still unreleased but
 	// might be a huge performance improvement

@@ -19,4 +19,5 @@ var Cases = []Case{
 	GetNonexistent,
 	ReplicationCursor,
 	RollupRelease,
+	IdempotentHold,
 }
