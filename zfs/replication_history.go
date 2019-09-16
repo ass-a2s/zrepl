@@ -34,14 +34,16 @@ func ZFSSetReplicationCursor(fs *DatasetPath, snapname string, expGuid uint64) (
 	// must not check expGuid == 0, that might be legitimate
 
 	snapPath := fmt.Sprintf("%s@%s", fs.ToString(), snapname)
+
 	debug("replication cursor: snap path %q", snapPath)
 	snapProps, err := ZFSGetCreateTXGAndGuid(snapPath)
 	if err != nil {
 		return errors.Wrapf(err, "get properties of %q", snapPath)
 	}
 	if expGuid != snapProps.Guid {
-		return fmt.Errorf("expected guid %v != actual guid %v for snap name %q", expGuid, actGuid, snapPath)
+		return fmt.Errorf("expected guid %v != actual guid %v for snap name %q", expGuid, snapProps.Guid, snapPath)
 	}
+
 	bookmarkPath := fmt.Sprintf("%s#%s", fs.ToString(), ReplicationCursorBookmarkName)
 	propsBookmark, err := ZFSGetCreateTXGAndGuid(bookmarkPath)
 	_, bookmarkNotExistErr := err.(*DatasetDoesNotExist)
@@ -49,15 +51,26 @@ func ZFSSetReplicationCursor(fs *DatasetPath, snapname string, expGuid uint64) (
 		return errors.Wrap(err, "cannot get bookmark txg")
 	}
 	if err == nil {
+		// bookmark does exist		
 		if snapProps.CreateTXG < propsBookmark.CreateTXG {
 			return errors.New("can only be advanced, not set back")
 		}
-		if err := ZFSDestroy(bookmarkPath); err != nil { // FIXME make safer by using new temporary bookmark, then rename, possible with channel programs
-			return errors.Wrap(err, "cannot destroy current cursor")
+
+		if propsBookmark.Guid == snapProps.Guid {
+			return nil // no action required
 		}
+
+		// FIXME make safer by using new temporary bookmark, then rename, possible with channel programs
+		// https://github.com/zfsonlinux/zfs/pull/7902/files might support this but is too new
+		if err := ZFSDestroy(bookmarkPath); err != nil {
+			return errors.Wrap(err, "cannot destroy current cursor to move it to new")
+		}
+		// fallthrough
 	}
+
 	if err := ZFSBookmark(fs, snapname, ReplicationCursorBookmarkName); err != nil {
 		return errors.Wrapf(err, "cannot create bookmark")
 	}
+
 	return nil
 }
