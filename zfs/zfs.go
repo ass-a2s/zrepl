@@ -21,7 +21,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/pkg/errors"
+	"github.com/zrepl/zrepl/util/circlog"
 	"github.com/zrepl/zrepl/util/envconst"
 )
 
@@ -425,6 +425,7 @@ type sendStream struct {
 
 	closeMtx     sync.Mutex
 	stdoutReader *os.File
+	stderrBuf    *circlog.CircularLog
 	opErr        error
 }
 
@@ -502,7 +503,7 @@ func (s *sendStream) killAndWait(precedingReadErr error) error {
 	// we managed to tear things down, no let's give the user some pretty *ZFSError
 	if exitErr != nil {
 		s.opErr = &ZFSError{
-			Stderr:  exitErr.Stderr,
+			Stderr:  []byte(s.stderrBuf.String()),
 			WaitErr: exitErr,
 		}
 	} else {
@@ -696,6 +697,8 @@ func (a ZFSSendArgs) validateCorrespondsToResumeToken(ctx context.Context, valCt
 	return nil
 }
 
+var zfsSendStderrCaptureMaxSize = envconst.Int("ZREPL_ZFS_SEND_STDERR_MAX_CAPTURE_SIZE", 1<<15)
+
 // if token != "", then send -t token is used
 // otherwise send [-i from] to is used
 // (if from is "" a full ZFS send is done)
@@ -726,11 +729,14 @@ func ZFSSend(ctx context.Context, sendArgs ZFSSendArgs) (streamCopier StreamCopi
 
 	cmd.Stdout = stdoutWriter
 
+	stderrBuf := circlog.MustNewCircularLog(zfsSendStderrCaptureMaxSize)
+	cmd.Stderr = stderrBuf
+
 	if err := cmd.Start(); err != nil {
 		cancel()
 		stdoutWriter.Close()
 		stdoutReader.Close()
-		return nil, err
+		return nil, errors.Wrap(err, "cannot start zfs send command")
 	}
 	stdoutWriter.Close()
 
@@ -738,9 +744,10 @@ func ZFSSend(ctx context.Context, sendArgs ZFSSendArgs) (streamCopier StreamCopi
 		cmd:          cmd,
 		kill:         cancel,
 		stdoutReader: stdoutReader,
+		stderrBuf:    stderrBuf,
 	}
 
-	return newSendStreamCopier(stream), err
+	return newSendStreamCopier(stream), nil
 }
 
 type DrySendType string
