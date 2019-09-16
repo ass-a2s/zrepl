@@ -2,7 +2,6 @@ package job
 
 import (
 	"context"
-	"fmt"
 	"sort"
 
 	"github.com/pkg/errors"
@@ -133,9 +132,6 @@ type alwaysUpToDateReplicationCursorHistory struct {
 var _ pruner.History = (*alwaysUpToDateReplicationCursorHistory)(nil)
 
 func (h alwaysUpToDateReplicationCursorHistory) ReplicationCursor(ctx context.Context, req *pdu.ReplicationCursorReq) (*pdu.ReplicationCursorRes, error) {
-	if req.GetGet() == nil {
-		return nil, fmt.Errorf("unsupported ReplicationCursor request: SnapJob only supports GETting a (faked) cursor")
-	}
 	fsvReq := &pdu.ListFilesystemVersionsReq{
 		Filesystem: req.GetFilesystem(),
 	}
@@ -165,6 +161,7 @@ func (j *SnapJob) doPrune(ctx context.Context) {
 	sender := endpoint.NewSender(endpoint.SenderConfig{
 		FSF:     j.fsfilter,
 		Encrypt: true, // FIXME this is irrelevant because endpoint is only used as a pruner.Target
+		HoldTag: "zrepl_FIXME_HARDCODED_NAME_push_hold_tag", // FIXME
 	})
 	j.pruner = j.prunerFactory.BuildLocalPruner(ctx, sender, alwaysUpToDateReplicationCursorHistory{sender})
 	log.Info("start pruning")

@@ -19,16 +19,21 @@ import (
 type SenderConfig struct {
 	FSF     zfs.DatasetFilter
 	Encrypt bool
+	HoldTag string
 }
 
 // Sender implements replication.ReplicationEndpoint for a sending side
 type Sender struct {
 	FSFilter zfs.DatasetFilter
 	encrypt  bool
+	holdTag  string
 }
 
 func NewSender(conf SenderConfig) *Sender {
-	return &Sender{FSFilter: conf.FSF, encrypt: conf.Encrypt}
+	if conf.HoldTag == "" {
+		panic("hold tag must not be empty") // FIXME
+	}
+	return &Sender{FSFilter: conf.FSF, encrypt: conf.Encrypt, holdTag: conf.HoldTag}
 }
 
 func (s *Sender) filterCheckFS(fs string) (*zfs.DatasetPath, error) {
@@ -165,13 +170,13 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.St
 	// (if `From` is a snapshot), by bookmarking it
 	if sendArgs.From != nil && r.GetFrom().GetType() == pdu.FilesystemVersion_Snapshot {
 		// in theory, this should always be a no-op (idempotent!)
-		err := zfs.ZFSSetReplicationCursor(sendArgsFSDP, sendArgs.From.RelName, sendArgs.From.GUID)
+		err := zfs.ZFSSetReplicationCursor(sendArgsFSDP, sendArgs.From.RelName[1:], sendArgs.From.GUID) // FIXME
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "cannot set replication cursor to `from` version before starting send")
 		}
 	}
 	// make sure replication is resumable by creating a hold on `To`
-	err = zfs.ZFSHold(ctx, sendArgs.FS, sendArgs.To.RelName, s.holdTag())
+	err = zfs.ZFSHold(ctx, sendArgs.FS, sendArgs.To.RelName[1:], s.holdTag) // FIXME
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "cannot hold `to` version %q before starting send", sendArgs.To.RelName)
 	}
@@ -234,15 +239,12 @@ func (p *Sender) HintMostRecentCommonAncestor(ctx context.Context, r *pdu.HintMo
 		return nil, fmt.Errorf("`Version.Name` must not be empty")
 	}
 
-	// TODO clear all of the holds aquired before Send() for versions older than r.GetVersion
-
 	err := p.moveCursorAndReleaseSendHold(ctx, r.GetFilesystem(), r.GetVersion())
 	if err != nil {
+		return nil, err
 	}
-	panic("not implemented")
 
-	// return &pdu.ReplicationCursorRes{Result: &pdu.ReplicationCursorRes_Guid{Guid: guid}}, nil
-
+	return &pdu.HintMostRecentCommonAncestorRes{}, nil
 }
 
 func (p *Sender) SendCompleted(ctx context.Context, r *pdu.SendCompletedReq) (*pdu.SendCompletedRes, error) {
@@ -252,10 +254,6 @@ func (p *Sender) SendCompleted(ctx context.Context, r *pdu.SendCompletedReq) (*p
 		return nil, err
 	}
 	return &pdu.SendCompletedRes{}, nil
-}
-
-func (p *Sender) holdTag() string {
-	panic("not implemented")
 }
 
 // mrcv = most recent common version
@@ -286,9 +284,9 @@ func (p *Sender) moveCursorAndReleaseSendHold(ctx context.Context, fs string, mr
 	}
 	log.Info("successfully moved replication cursor")
 
-	log = log.WithField("hold_tag", p.holdTag())
+	log = log.WithField("hold_tag", p.holdTag)
 	log.Debug("release holds earlier than most recent common version")
-	err = zfs.ZFSReleaseAllOlderAndIncludingGUID(ctx, dp.ToString(), mrcv.GetGuid(), p.holdTag())
+	err = zfs.ZFSReleaseAllOlderAndIncludingGUID(ctx, dp.ToString(), mrcv.GetGuid(), p.holdTag)
 	if err != nil {
 		return errors.Wrap(err, "cannot release holds up to most recent common version")
 	}
@@ -611,6 +609,15 @@ func (s *Receiver) DestroySnapshots(ctx context.Context, req *pdu.DestroySnapsho
 		return nil, err
 	}
 	return doDestroySnapshots(ctx, lp, req.Snapshots)
+}
+
+func (p *Receiver) HintMostRecentCommonAncestor(ctx context.Context, r *pdu.HintMostRecentCommonAncestorReq) (*pdu.HintMostRecentCommonAncestorRes, error) {
+	// not interesting to receiver
+	return &pdu.HintMostRecentCommonAncestorRes{}, nil
+}
+
+func (p *Receiver) SendCompleted(context.Context, *pdu.SendCompletedReq) (*pdu.SendCompletedRes, error) {
+	return &pdu.SendCompletedRes{}, nil
 }
 
 func doDestroySnapshots(ctx context.Context, lp *zfs.DatasetPath, snaps []*pdu.FilesystemVersion) (*pdu.DestroySnapshotsRes, error) {

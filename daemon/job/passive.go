@@ -71,6 +71,7 @@ func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource
 	m.senderConfig = &endpoint.SenderConfig{
 		FSF:     fsf,
 		Encrypt: in.Send.Encrypted,
+		HoldTag: "zrepl_FIXME_HARDCODED_NAME_push_hold_tag", // FIXME
 	}
 
 	if m.snapper, err = snapper.FromConfig(g, fsf, in.Snapshotting); err != nil {

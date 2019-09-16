@@ -374,7 +374,8 @@ func (fs *Filesystem) doPlanning(ctx context.Context) ([]*Step, error) {
 				WithField("mrca", mrca.String())
 			log.Debug("hint most recent common ancestor")
 			hint := &pdu.HintMostRecentCommonAncestorReq{
-				Version: mrca,
+				Filesystem: fs.Path,
+				Version:    mrca,
 			}
 			_, err := ep.HintMostRecentCommonAncestor(ctx, hint)
 			if err != nil {

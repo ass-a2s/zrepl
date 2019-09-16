@@ -151,6 +151,7 @@ func modePushFromConfig(g *config.Global, in *config.PushJob) (*modePush, error)
 	m.senderConfig = &endpoint.SenderConfig{
 		FSF:     fsf,
 		Encrypt: in.Send.Encrypted,
+		HoldTag: "zrepl_FIXME_HARDCODED_NAME_push_hold_tag", // FIXME
 	}
 	m.plannerPolicy = &logic.PlannerPolicy{
 		EncryptedSend: logic.TriFromBool(in.Send.Encrypted),
