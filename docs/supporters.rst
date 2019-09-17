@@ -42,4 +42,5 @@ We would like to thank the following people and organizations for supporting zre
 * |supporter-code| `Justin Scholz <https://github.com/JMoVS>`_
 * |supporter-code| `InsanePrawn <https://github.com/InsanePrawn>`_
 * |supporter-code| `Ben Woods <https://www.freshports.org/sysutils/zrepl/>`_
+* |supporter-code| `Janis Streib <https://github.com/janisstreib>`_
 * |supporter-code| `Anton Schirg <https://github.com/antonxy>`_
