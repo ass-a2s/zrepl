@@ -233,7 +233,7 @@ func (p *Sender) HintMostRecentCommonAncestor(ctx context.Context, r *pdu.HintMo
 		return nil, fmt.Errorf("`Filesystem` must not be empty")
 	}
 	if r.GetVersion().GetType() != pdu.FilesystemVersion_Snapshot {
-		return nil, fmt.Errorf("`Version.Type` must be a snapshot")
+		return nil, fmt.Errorf("`Version.Type` must be a snapshot") // FIXME: this is not true, see comment in moveCursorAndReleaseSendHold
 	}
 	if r.GetVersion().GetName() == "" {
 		return nil, fmt.Errorf("`Version.Name` must not be empty")
@@ -269,8 +269,17 @@ func (p *Sender) moveCursorAndReleaseSendHold(ctx context.Context, fs string, mr
 		return fmt.Errorf("`To.Name` must not be empty")
 	}
 	if mrcv.GetType() != pdu.FilesystemVersion_Snapshot {
-		return fmt.Errorf("`To.Type` must be a snapshot")
+		return fmt.Errorf("`To.Type` must be a snapshot") // FIXME: this is not true, see below
 	}
+
+	// FIXME: How to make this work with just a GUID (i.e. for bookmarks and snapshots)
+	// Use the GUID to find existing snapshots & cursors with that guid
+	// if we found a snapshot: fine, use it for bookmarking
+	// if we only found a bookmark: tough luck, can't create a replication cursor from bookmarks (would be a bookmark of bookmarks)
+	// ===> log that that bookmark is hopefully the replication cursor
+	//
+	// release older holds based on the results from finding existing snapshots & cursors with that guid (need to list anyways, see code in ZFSReleaseAllOlderAndIncludingGUID)
+	// then determine whether  could be snapshot
 
 	log := getLogger(ctx).WithField("guid", mrcv.GetGuid()).
 		WithField("fs", dp.ToString()).
