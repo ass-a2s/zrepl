@@ -1060,7 +1060,6 @@ func ZFSRecvClearResumeToken(fs string) (err error) {
 	cmd := exec.Command(ZFS_BINARY, "recv", "-A", fs)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
-		// TODO platformtest
 		if bytes.Contains(o, []byte("does not have any resumable receive state to abort")) {
 			return nil
 		}
