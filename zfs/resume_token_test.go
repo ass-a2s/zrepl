@@ -70,7 +70,7 @@ func TestParseResumeToken(t *testing.T) {
 				ToName: "rpool/home/cs@manual_20190808_091825_UTC",
 				
 			},
-		}
+		},
 	}
 
 	for _, test := range tbl {
