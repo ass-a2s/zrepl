@@ -14,12 +14,7 @@ func ReplicationCursor(ctx *platformtest.Context) {
 		+  "foo bar"
 		+  "foo bar@1 with space"
 	`)
-
 	ds, err := zfs.NewDatasetPath(ctx.RootDataset + "/foo bar")
-	if err != nil {
-		panic(err)
-	}
-	guid, err := zfs.ZFSSetReplicationCursor(ds, "1 with space")
 	if err != nil {
 		panic(err)
 	}
@@ -27,8 +22,9 @@ func ReplicationCursor(ctx *platformtest.Context) {
 	if err != nil {
 		panic(err)
 	}
-	if guid != snapProps.Guid {
-		panic(fmt.Sprintf("guids to not match: %v != %v", guid, snapProps.Guid))
+	err = zfs.ZFSSetReplicationCursor(ds, "1 with space", snapProps.Guid)
+	if err != nil {
+		panic(err)
 	}
 
 	bm, err := zfs.ZFSGetReplicationCursor(ds)
@@ -40,9 +36,6 @@ func ReplicationCursor(ctx *platformtest.Context) {
 	}
 	if bm.Guid != snapProps.Guid {
 		panic(fmt.Sprintf("guids do not match: %v != %v", bm.Guid, snapProps.Guid))
-	}
-	if bm.Guid != guid {
-		panic(fmt.Sprintf("guids do not match: %v != %v", bm.Guid, guid))
 	}
 
 	// test nonexistent
