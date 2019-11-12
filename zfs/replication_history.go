@@ -32,31 +32,31 @@ func ZFSSetReplicationCursor(fs *DatasetPath, snapname string, expGuid uint64) (
 		return errors.New("snapname must not be empty")
 	}
 	// must not check expGuid == 0, that might be legitimate
-
 	snapPath := fmt.Sprintf("%s@%s", fs.ToString(), snapname)
 
 	debug("replication cursor: snap path %q", snapPath)
 	snapProps, err := ZFSGetCreateTXGAndGuid(snapPath)
 	if err != nil {
-		return errors.Wrapf(err, "get properties of %q", snapPath)
+		return errors.Wrap(err, "cannot get snapshot createtxg and guid")
 	}
 	if expGuid != snapProps.Guid {
 		return fmt.Errorf("expected guid %v != actual guid %v for snap name %q", expGuid, snapProps.Guid, snapPath)
 	}
 
 	bookmarkPath := fmt.Sprintf("%s#%s", fs.ToString(), ReplicationCursorBookmarkName)
-	propsBookmark, err := ZFSGetCreateTXGAndGuid(bookmarkPath)
+	bookmarkProps, err := ZFSGetCreateTXGAndGuid(bookmarkPath)
 	_, bookmarkNotExistErr := err.(*DatasetDoesNotExist)
 	if err != nil && !bookmarkNotExistErr {
 		return errors.Wrap(err, "cannot get bookmark txg")
 	}
 	if err == nil {
-		// bookmark does exist		
-		if snapProps.CreateTXG < propsBookmark.CreateTXG {
-			return errors.New("can only be advanced, not set back")
+		// bookmark does exist
+
+		if snapProps.CreateTXG < bookmarkProps.CreateTXG {
+			return errors.New("cannot can only be advanced, not set back")
 		}
 
-		if propsBookmark.Guid == snapProps.Guid {
+		if bookmarkProps.Guid == snapProps.Guid {
 			return nil // no action required
 		}
 
