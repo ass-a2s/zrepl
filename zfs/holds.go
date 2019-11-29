@@ -166,7 +166,7 @@ func ZFSReleaseAllOlderAndIncludingGUID(ctx context.Context, fs string, snapGuid
 
 	}
 	if len(otherLines) > 0 {
-		return fmt.Errorf("unknown zfs error while releasing hold with tag %q: unidentified stderr lines\n%s", strings.Join(otherLines, "\n"))
+		return fmt.Errorf("unknown zfs error while releasing hold with tag %q: unidentified stderr lines\n%s", tag, strings.Join(otherLines, "\n"))
 	}
 	return nil
 

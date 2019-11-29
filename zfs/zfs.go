@@ -644,7 +644,7 @@ func (a ZFSSendArgs) validateCorrespondsToResumeToken(ctx context.Context, valCt
 		return nil // nothing to do
 	}
 
-	debug("decoding resume token %q")
+	debug("decoding resume token %q", a.ResumeToken)
 	t, err := ParseResumeToken(ctx, a.ResumeToken)
 	debug("decode resumee token result: %#v %T %v", t, err, err)
 	if err != nil {
@@ -657,7 +657,7 @@ func (a ZFSSendArgs) validateCorrespondsToResumeToken(ctx context.Context, valCt
 	}
 
 	if a.FS != tokenFS.ToString() {
-		return fmt.Errorf("filesystem in resume token field `toname` = %q does not match expected value %q", tokenFS, a.FS)
+		return fmt.Errorf("filesystem in resume token field `toname` = %q does not match expected value %q", tokenFS.ToString(), a.FS)
 	}
 
 	if (a.From != nil) != t.HasFromGUID { // existence must be same
@@ -684,12 +684,12 @@ func (a ZFSSendArgs) validateCorrespondsToResumeToken(ctx context.Context, valCt
 
 	if a.Encrypted.B {
 		if !(t.RawOK && t.CompressOK) {
-			return fmt.Errorf("resume token must have `rawok` and `compressok` = true but got %q %q", t.RawOK, t.CompressOK)
+			return fmt.Errorf("resume token must have `rawok` and `compressok` = true but got %v %v", t.RawOK, t.CompressOK)
 		}
 		// fallthrough
 	} else {
 		if t.RawOK || t.CompressOK {
-			return fmt.Errorf("resume token must not have `rawok` or `compressok` set but got %q %q", t.RawOK, t.CompressOK)
+			return fmt.Errorf("resume token must not have `rawok` or `compressok` set but got %v %v", t.RawOK, t.CompressOK)
 		}
 		// fallthrough
 	}
