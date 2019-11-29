@@ -53,7 +53,7 @@ func ZFSSetReplicationCursor(fs *DatasetPath, snapname string, expGuid uint64) (
 		// bookmark does exist
 
 		if snapProps.CreateTXG < bookmarkProps.CreateTXG {
-			return errors.New("cannot can only be advanced, not set back")
+			return errors.New("can only be advanced, not set back")
 		}
 
 		if bookmarkProps.Guid == snapProps.Guid {
