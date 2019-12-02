@@ -1,4 +1,4 @@
-## Algorithm for a single replication step
+## Algorithm for a Single Replication Step
 
 The algorithm described below describes how a single replication step must be implemented.
 A *replication step* is a full send of a snapshot `to` for initial replication, or an incremental send (`from => to`) for incremental replication.
@@ -182,3 +182,87 @@ Note that "make sure `from` can go away" is the inverse of "Send-side: make sure
 - `idempotent_destroy(bookmark #b_$GUID, of a snapshot s)` must atomically check that `$GUID == s.guid` before destroying s
 - `idempotent_bookmark(snapshot s, $GUID, name #b_$GUID)` must atomically check that `$GUID == s.guid` at the time of bookmark creation
 - `idempotent_destroy(snapshot s)` must atomically check that zrepl's `s.guid` matches the current `guid` of the snapshot (i.e. destroy by guid)
+
+
+## Algorithm for Planning and Executing Replication of a Filesystems
+
+This algorithm describes a technique to plan the replication of a filesystem or zvol.
+The algorithm is invoked with a sender and receiver, and a sender-side filesystem path.
+It builds a diff between the sender and receiver filesystem bookmarks+snapshots and determines whether a replication conflict exists or whether fast-forward replication using full or incremental sends is possible.
+In case of conflict, the algorithm errors out with a conflict description that can be used to manually or automatically resolve the conflict.
+Otherwise, the algorithm builds a list of replication steps that are then worked on sequentially by the "Algorithm for a Single Replication Step".
+
+The algorithm ensures that a plan can be executed exactly as planned by aquiring appropriate zfs holds.
+The algorithm can be configured to retry a plan when encountering non-permanent errors (e.g. network errors)
+However, permanent errors result in the plan being aborted.
+Regardless of whether a plan can be executed to completion or is aborted, the algorithm guarantees that leftover artifacts (i.e. holds) of replication between the send-side and receive-side filesystem are cleaed up before a new plan starts executing.
+Thus, there might be stale holds on sending or receiving side after a crash or other permanent error, but those are removed before re-planning is done.
+
+The algorithm is fit to be executed in parallel from the same sender to different receivers.
+
+The algorithm reserves the following sub-namespaces:
+* zfs hold: `zrepl_FS`
+
+### Definitions
+
+#### ZFS Filesystem Path
+We refer to the name of a ZFS filesystem or volume as a *filesystem path*, sometimes just *path*.
+The name includes the pool name.
+
+#### Sender and Receiver
+Sender and Receiver are passed as RPC stubs to the algorithm.
+One of those RPC stubs will typically be local, i.e., call methods on a struct in the same address space.
+The other RPC stub may invoke actual calls over the network (unless local replication is used).
+The algorithm does not make any assumption about which object is local or an actual stub.
+This design decouples the replication logic (described in this algorithm) from the question which side (sender or receiver) initiates the replication.
+
+Apart form a set of common RPCs, Senders implement the `Send` rpc.
+Receivers implement the `Receive` rpc.
+
+
+## Algorithm for Planning and Executing Replication of Multiple Filesystems matched by a Filter
+The model of the receiver includes the assumption that it will `Receive` all snapshot streams sent to it into filesystems with paths prefixed with `rootfs`.
+This is useful for separating filesystem path namespaces for multiple clients.
+The receiver hides this prefixing in its RPC interface, i.e., when responding to `ListFilesystems` rpcs, the prefix is removed before sending the response.
+This behavior is useful to achieve symmetry in this algorithm: we do not need to take the prefixing into consideration when computing diffs.
+For the receiver, it has the advantage that `Receive` rpc can enforce the namespacing and need not trust this algorithm to apply it correctly.
+
+The receiver is also allowed (and may need to) do implement other filtering / namespace transformations.
+For example, when only `foo/a/b` has been received, but not `foo` nor `foo/a`, the receiver must not include the latter two in its `ListFilesystems` response.
+The current zrepl receiver endpoint implementation uses the `zrepl:placeholder` property to mark filesystems `foo` and `foo/a` as placeholders, and filters out such filesystems in the `ListFilesystems` response.
+Another approach would be to have a flat list of received filesystems per sender, and have a separate table that associates send-side names and receive-side filesystem paths.
+
+Similarly, the sender is allowed to filter its view filesystems and snapshots.
+
+### Algorithm
+
+Determine send-side and recv-side snapshots, and try to build a fast-forward list replication steps STEPS.
+STEPs may contain an optional initial full send, and subsequent incremental send steps.
+The first step in the list may include a resume token.
+If fast-forward is not possible, produce a conflict description and ERROR OUT.
+TODOs:
+- make it configurable what snapshots are included in the list (i.e. every one we see, only most recent, at least one every X hours, ...)
+
+Ensure that the plan can be carried out by aquiring holds / step bookmarks on each of the steps
+- `for to in STEPS.to: idempotent_hold(to, zrepl_FS_)`
+- `if STEPS[0].from != nil: idempotent_STEP_bookmark(STEPS[0].from, zrepl_FS_)` TODO fixme different namespace for STEP and FS, generalize the procedure
+  
+Find the next step that we need to do: (we might be in an second invocation of this algorithm after a network failure and some steps might already be done):
+- `res_tok := receiver.ResumeToken(fs)`
+- `rmrfsv := receiver.MostRecentFilesystemVersion(fs)`
+- if `res_tok !=  nil`: ensure that `res_tok` has a correspondinng step in `STEPS`, otherwise ERROR OUT
+- if `rmrfsv != nil`: ensure that `res_tok` has a correspondinng step in `STEPS`, otherwise ERROR OUT
+- if `(res_token != nil && rmrfsv != nil)`: ensure that `res_tok` is the subsequent step to the one we found for `rmrfsv`
+- if both are nil, ERROR OUT (TODO when can this happen)
+
+WIPfrom here
+
+- `v := if res_tok != nil { res_tok } else rmrfsv`
+- `last_completed_step = STEPS.find(|s| s.to == rmrfsv)`
+  - if not found
+- match up `rfsvs` with the steps we have planned
+- 
+- Execute the plan by idempotently applying each steps _from the beginning_: `for step in STEPS`
+- `resp = receiver.PrepareRecv(step)`
+  - if `resp` is `already_received` => this step is done, go to next step
+  - if `resp` is `
