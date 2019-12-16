@@ -1,3 +1,14 @@
+The goal of this document is to describe what logical steps zrepl takes to replicate ZFS filesystems.
+
+* The [Single Replication Step](#zrepl-algo-single-step) algorithm is implemented as described
+  * the feature to hold receive-side `to` immediately after replication is not used, though
+* The [Algorithm for Planning and Executing Replication of an Filesystems](#zrepl-algo-filesystem) is a design draft
+* The [Notes on Planning and Executing Replication of Multiple Filesystems](#zrepl-algo-multiple-filesystems-notes) cover 
+
+
+---
+
+<a id="zrepl-algo-single-step"></a>
 ## Algorithm for a Single Replication Step
 
 The algorithm described below describes how a single replication step must be implemented.
@@ -141,7 +152,7 @@ If the RPC used for `zfs recv` returned without error, this phase is done.
 At the end of this phase, all intermediate state we built up to support the resumable replication of the step is destroyed.
 However, consumers of this algorithm might want to take advantage of the fact that we currently still have holds / step bookmarks.
 
-##### Recv-side: Optionally hold `to` with a caller-defined tag**
+##### Recv-side: Optionally hold `to` with a caller-defined tag
 
 Users of the algorithm might want to depend on `to` being available on the receiving side for a longer duration than the lifetime of the current step's algorithm invocation.
 For reasons explained in the next paragraph, we cannot guarantee that we have a `hold` when `recv` exists. If that were the case, we could take our time to provide a generalized callback to the user of the algorithm, and have them do whatever they want with `to` while we guarantee that `to` doesn't go away through the hold. But that functionality isn't available, so we only provide a fixed operation right after receive: **take a `hold` with a tag of the algorithm user's choice**. That's what's needed to guarantee that a replication plan, consisting of multiple consecutive steps, can be carried out without a receive-side prune job interfering by destroying `to`. Technically, this step is racy, i.e., it could happen that `to` is destroyed between `recv` and `hold`. But this is a) unlikely and b) not fatal because we can detect that hold fails because the 'dataset does not exist` and re-do the entire transmission since we still hold send-side `from` and `to`, i.e. we just lose a lot of work in rare cases.
@@ -186,9 +197,10 @@ Note that "make sure `from` can now go away" is the inverse of "Send-side: make 
 - `idempotent_destroy(snapshot s)` must atomically check that zrepl's `s.guid` matches the current `guid` of the snapshot (i.e. destroy by guid)
 
 
-## Algorithm for Planning and Executing Replication of a Filesystems (NEEDS REVIEW)
+<a id="zrepl-algo-filesystem"></a>
+## Algorithm for Planning and Executing Replication of a Filesystems (planned, not implemented yet)
 
-This algorithm describes a technique to plan the replication of a filesystem or zvol.
+This algorithm describes how a filesystem or zvol is replicated in zrepl.
 The algorithm is invoked with a `jobid`, `sender`, `receiver`, a sender-side `filesystem path`.
 It builds a diff between the sender and receiver filesystem bookmarks+snapshots and determines whether a replication conflict exists or whether fast-forward replication using full or incremental sends is possible.
 In case of conflict, the algorithm errors out with a conflict description that can be used to manually or automatically resolve the conflict.
@@ -283,8 +295,13 @@ In the wind-down phase of each replication step `from => to`, while the per-step
 - `idempotent_FSSTEP_bookmark` is like `idempotent_STEP_bookmark`, but with prefix `zrepl_FSSTEP` instead of `zrepl_STEP`
 
 
-## Algorithm for Planning and Executing Replication of Multiple Filesystems matched by a Filter
-The model of the receiver includes the assumption that it will `Receive` all snapshot streams sent to it into filesystems with paths prefixed with `rootfs`.
+<a id="zrepl-algo-multiple-filesystems-notes"></a>
+
+## Notes on Planning and Executing Replication of Multiple Filesystems
+
+### The RPC Interfaces Uses Send-side Filesystem Names to Identify a Filesystem
+
+The model of the receiver includes the assumption that it will `Receive` all snapshot streams sent to it into filesystems with paths prefixed with `root_fs`.
 This is useful for separating filesystem path namespaces for multiple clients.
 The receiver hides this prefixing in its RPC interface, i.e., when responding to `ListFilesystems` rpcs, the prefix is removed before sending the response.
 This behavior is useful to achieve symmetry in this algorithm: we do not need to take the prefixing into consideration when computing diffs.
@@ -295,4 +312,16 @@ For example, when only `foo/a/b` has been received, but not `foo` nor `foo/a`, t
 The current zrepl receiver endpoint implementation uses the `zrepl:placeholder` property to mark filesystems `foo` and `foo/a` as placeholders, and filters out such filesystems in the `ListFilesystems` response.
 Another approach would be to have a flat list of received filesystems per sender, and have a separate table that associates send-side names and receive-side filesystem paths.
 
-Similarly, the sender is allowed to filter its view filesystems and snapshots.
+Similarly, the sender is allowed to filter the output of its RPC interface to hide certain filesystems or snapshots.
+
+#### Consequences of the Above Design
+
+Namespace filtering and transformations of filesystem paths on sender and receiver are user-configurable.
+Both ends of the replication setup have their own config, and do not coordinate config changes.
+This results in a number of challenges:
+
+- A sender might change its filter to allow additional filesystems to be replicated.
+  For example, where `foo/a/b` was initially allowed, the new filter might allow `foo` and `foo/a` as well.
+  If the receiver uses the `zrepl:placeholder` approach as sketched out above, this means that the receiver will need to replace the placeholder filesystems `$root_fs/foo` and `$root_fs/foo/a` with the incoming full sends of `foo` and `foo/a`.
+
+- Send-side renames cannot be handled efficiently because send-side rename effectively changes the filesystem identity because we use its name.
