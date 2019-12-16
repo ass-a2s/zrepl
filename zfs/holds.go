@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/pkg/errors"
+	"github.com/zrepl/zrepl/util/envconst"
 )
 
 // no need for feature tests, holds have been around forever
@@ -170,4 +172,15 @@ func ZFSReleaseAllOlderAndIncludingGUID(ctx context.Context, fs string, snapGuid
 	}
 	return nil
 
+}
+
+var StepHoldTagRE = regexp.MustCompile("^zrepl_STEP_J_(.+)")
+
+func StepHoldTag(jobid JobID) (string, error) {
+	maxlen := envconst.Int("ZREPL_ZFS_MAX_HOLD_TAG_LEN", 256-1) // 256 include NULL byte, from module/zfs/dsl_userhold.c
+	t := fmt.Sprintf("zrepl_STEP_J_%s", jobid)
+	if len(t) > maxlen {
+		return "", fmt.Errorf("hold tag %q exceeds max length of %d", t, maxlen)
+	}
+	return t, nil
 }

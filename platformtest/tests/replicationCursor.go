@@ -9,6 +9,7 @@ import (
 
 func ReplicationCursor(ctx *platformtest.Context) {
 
+	jid := zfs.MustMakeJobID("platformtest_replicationcursor")
 	platformtest.Run(ctx, platformtest.PanicErr, ctx.RootDataset, `
 		CREATEROOT
 		+  "foo bar"
@@ -22,12 +23,12 @@ func ReplicationCursor(ctx *platformtest.Context) {
 	if err != nil {
 		panic(err)
 	}
-	err = zfs.ZFSSetReplicationCursor(ds, "1 with space", snapProps.Guid)
+	err = zfs.ZFSSetReplicationCursor(ds, "1 with space", snapProps.Guid, jid)
 	if err != nil {
 		panic(err)
 	}
 
-	bm, err := zfs.ZFSGetReplicationCursor(ds)
+	bm, err := zfs.ZFSGetReplicationCursor(ds, jid)
 	if err != nil {
 		panic(err)
 	}
@@ -43,7 +44,7 @@ func ReplicationCursor(ctx *platformtest.Context) {
 	if err != nil {
 		panic(err)
 	}
-	bm2, err := zfs.ZFSGetReplicationCursor(ds)
+	bm2, err := zfs.ZFSGetReplicationCursor(ds, jid)
 	if bm2 != nil {
 		panic(fmt.Sprintf("expecting no replication cursor after deleting it, got %v", bm))
 	}

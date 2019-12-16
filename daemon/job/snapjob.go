@@ -19,7 +19,7 @@ import (
 )
 
 type SnapJob struct {
-	name     string
+	name     zfs.JobID
 	fsfilter zfs.DatasetFilter
 	snapper  *snapper.PeriodicOrManual
 
@@ -30,7 +30,7 @@ type SnapJob struct {
 	pruner *pruner.Pruner
 }
 
-func (j *SnapJob) Name() string { return j.name }
+func (j *SnapJob) Name() string { return j.name.String() }
 
 func (j *SnapJob) Type() Type { return TypeSnap }
 
@@ -45,13 +45,16 @@ func snapJobFromConfig(g *config.Global, in *config.SnapJob) (j *SnapJob, err er
 	if j.snapper, err = snapper.FromConfig(g, fsf, in.Snapshotting); err != nil {
 		return nil, errors.Wrap(err, "cannot build snapper")
 	}
-	j.name = in.Name
+	j.name, err = zfs.MakeJobID(in.Name)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid job name")
+	}
 	j.promPruneSecs = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace:   "zrepl",
 		Subsystem:   "pruning",
 		Name:        "time",
 		Help:        "seconds spent in pruner",
-		ConstLabels: prometheus.Labels{"zrepl_job": j.name},
+		ConstLabels: prometheus.Labels{"zrepl_job": j.name.String()},
 	}, []string{"prune_side"})
 	j.prunerFactory, err = pruner.NewLocalPrunerFactory(in.Pruning, j.promPruneSecs)
 	if err != nil {
@@ -160,8 +163,8 @@ func (j *SnapJob) doPrune(ctx context.Context) {
 	ctx = logging.WithSubsystemLoggers(ctx, log)
 	sender := endpoint.NewSender(endpoint.SenderConfig{
 		FSF:     j.fsfilter,
-		Encrypt: true, // FIXME this is irrelevant because endpoint is only used as a pruner.Target
-		HoldTag: "zrepl_FIXME_HARDCODED_NAME_push_hold_tag", // FIXME
+		Encrypt: true,                                       // FIXME this is irrelevant because endpoint is only used as a pruner.Target
+		JobID: j.name,
 	})
 	j.pruner = j.prunerFactory.BuildLocalPruner(ctx, sender, alwaysUpToDateReplicationCursorHistory{sender})
 	log.Info("start pruning")

@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -28,7 +29,7 @@ import (
 
 type ActiveSide struct {
 	mode      activeMode
-	name      string
+	name      zfs.JobID
 	connecter transport.Connecter
 
 	prunerFactory *pruner.PrunerFactory
@@ -141,17 +142,18 @@ func (m *modePush) ResetConnectBackoff() {
 	}
 }
 
-func modePushFromConfig(g *config.Global, in *config.PushJob) (*modePush, error) {
+func modePushFromConfig(g *config.Global, in *config.PushJob, jobID zfs.JobID) (*modePush, error) {
 	m := &modePush{}
 
 	fsf, err := filters.DatasetMapFilterFromConfig(in.Filesystems)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannnot build filesystem filter")
 	}
+
 	m.senderConfig = &endpoint.SenderConfig{
 		FSF:     fsf,
 		Encrypt: in.Send.Encrypted,
-		HoldTag: "zrepl_FIXME_HARDCODED_NAME_push_hold_tag", // FIXME
+		JobID:   jobID,
 	}
 	m.plannerPolicy = &logic.PlannerPolicy{
 		EncryptedSend: logic.TriFromBool(in.Send.Encrypted),
@@ -238,7 +240,7 @@ func (m *modePull) ResetConnectBackoff() {
 	}
 }
 
-func modePullFromConfig(g *config.Global, in *config.PullJob) (m *modePull, err error) {
+func modePullFromConfig(g *config.Global, in *config.PullJob, jobID zfs.JobID) (m *modePull, err error) {
 	m = &modePull{}
 	m.interval = in.Interval
 
@@ -257,23 +259,39 @@ func modePullFromConfig(g *config.Global, in *config.PullJob) (m *modePull, err 
 	return m, nil
 }
 
-func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *ActiveSide, err error) {
+func activeSide(g *config.Global, in *config.ActiveJob, configJob interface{}) (j *ActiveSide, err error) {
 
-	j = &ActiveSide{mode: mode}
-	j.name = in.Name
+	j = &ActiveSide{}
+	j.name, err = zfs.MakeJobID(in.Name)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid job name")
+	}
+
+	switch v := configJob.(type) {
+	case *config.PushJob:
+		j.mode, err = modePushFromConfig(g, v, j.name) // shadow
+	case *config.PullJob:
+		j.mode, err = modePullFromConfig(g, v, j.name) // shadow
+	default:
+		panic(fmt.Sprintf("implementation error: unknown job type %T", v))
+	}
+	if err != nil {
+		return nil, err // no wrapping required
+	}
+
 	j.promRepStateSecs = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace:   "zrepl",
 		Subsystem:   "replication",
 		Name:        "state_time",
 		Help:        "seconds spent during replication",
-		ConstLabels: prometheus.Labels{"zrepl_job": j.name},
+		ConstLabels: prometheus.Labels{"zrepl_job": j.name.String()},
 	}, []string{"state"})
 	j.promBytesReplicated = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace:   "zrepl",
 		Subsystem:   "replication",
 		Name:        "bytes_replicated",
 		Help:        "number of bytes replicated from sender to receiver per filesystem",
-		ConstLabels: prometheus.Labels{"zrepl_job": j.name},
+		ConstLabels: prometheus.Labels{"zrepl_job": j.name.String()},
 	}, []string{"filesystem"})
 
 	j.connecter, err = fromconfig.ConnecterFromConfig(g, in.Connect)
@@ -286,7 +304,7 @@ func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *Act
 		Subsystem:   "pruning",
 		Name:        "time",
 		Help:        "seconds spent in pruner",
-		ConstLabels: prometheus.Labels{"zrepl_job": j.name},
+		ConstLabels: prometheus.Labels{"zrepl_job": j.name.String()},
 	}, []string{"prune_side"})
 	j.prunerFactory, err = pruner.NewPrunerFactory(in.Pruning, j.promPruneSecs)
 	if err != nil {
@@ -302,7 +320,7 @@ func (j *ActiveSide) RegisterMetrics(registerer prometheus.Registerer) {
 	registerer.MustRegister(j.promBytesReplicated)
 }
 
-func (j *ActiveSide) Name() string { return j.name }
+func (j *ActiveSide) Name() string { return j.name.String() }
 
 type ActiveSideStatus struct {
 	Replication                    *report.Report

@@ -20,7 +20,7 @@ import (
 
 type PassiveSide struct {
 	mode   passiveMode
-	name   string
+	name   zfs.JobID
 	listen transport.AuthenticatedListenerFactory
 }
 
@@ -44,7 +44,7 @@ func (m *modeSink) Handler() rpc.Handler {
 func (m *modeSink) RunPeriodic(_ context.Context)  {}
 func (m *modeSink) SnapperReport() *snapper.Report { return nil }
 
-func modeSinkFromConfig(g *config.Global, in *config.SinkJob) (m *modeSink, err error) {
+func modeSinkFromConfig(g *config.Global, in *config.SinkJob, jobID zfs.JobID) (m *modeSink, err error) {
 	m = &modeSink{}
 	m.rootDataset, err = zfs.NewDatasetPath(in.RootFS)
 	if err != nil {
@@ -61,7 +61,7 @@ type modeSource struct {
 	snapper      *snapper.PeriodicOrManual
 }
 
-func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource, err error) {
+func modeSourceFromConfig(g *config.Global, in *config.SourceJob, jobID zfs.JobID) (m *modeSource, err error) {
 	// FIXME exact dedup of modePush
 	m = &modeSource{}
 	fsf, err := filters.DatasetMapFilterFromConfig(in.Filesystems)
@@ -71,7 +71,7 @@ func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource
 	m.senderConfig = &endpoint.SenderConfig{
 		FSF:     fsf,
 		Encrypt: in.Send.Encrypted,
-		HoldTag: "zrepl_FIXME_HARDCODED_NAME_push_hold_tag", // FIXME
+		JobID:   jobID,
 	}
 
 	if m.snapper, err = snapper.FromConfig(g, fsf, in.Snapshotting); err != nil {
@@ -95,9 +95,25 @@ func (m *modeSource) SnapperReport() *snapper.Report {
 	return m.snapper.Report()
 }
 
-func passiveSideFromConfig(g *config.Global, in *config.PassiveJob, mode passiveMode) (s *PassiveSide, err error) {
+func passiveSideFromConfig(g *config.Global, in *config.PassiveJob, configJob interface{}) (s *PassiveSide, err error) {
 
-	s = &PassiveSide{mode: mode, name: in.Name}
+	s = &PassiveSide{}
+
+	s.name, err = zfs.MakeJobID(in.Name)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid job name")
+	}
+
+	switch v := configJob.(type) {
+	case *config.SinkJob:
+		s.mode, err = modeSinkFromConfig(g, v, s.name) // shadow
+	case *config.SourceJob:
+		s.mode, err = modeSourceFromConfig(g, v, s.name) // shadow
+	}
+	if err != nil {
+		return nil, err // no wrapping necessary
+	}
+
 	if s.listen, err = fromconfig.ListenerFactoryFromConfig(g, in.Serve); err != nil {
 		return nil, errors.Wrap(err, "cannot build listener factory")
 	}
@@ -105,7 +121,7 @@ func passiveSideFromConfig(g *config.Global, in *config.PassiveJob, mode passive
 	return s, nil
 }
 
-func (j *PassiveSide) Name() string { return j.name }
+func (j *PassiveSide) Name() string { return j.name.String() }
 
 type PassiveStatus struct {
 	Snapper *snapper.Report

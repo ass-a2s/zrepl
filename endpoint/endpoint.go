@@ -19,21 +19,33 @@ import (
 type SenderConfig struct {
 	FSF     zfs.DatasetFilter
 	Encrypt bool
-	HoldTag string
+	JobID   zfs.JobID
+}
+
+func (c *SenderConfig) Validate() error {
+	if _, err := zfs.StepHoldTag(c.JobID); err != nil {
+		return fmt.Errorf("JobID cannot be used for hold tag: %s", err)
+	}
+	return nil
 }
 
 // Sender implements replication.ReplicationEndpoint for a sending side
 type Sender struct {
-	FSFilter zfs.DatasetFilter
-	encrypt  bool
-	holdTag  string
+	FSFilter    zfs.DatasetFilter
+	encrypt     bool
+	jobId       zfs.JobID
+	stepHoldTag string
 }
 
 func NewSender(conf SenderConfig) *Sender {
-	if conf.HoldTag == "" {
-		panic("hold tag must not be empty") // FIXME
+	if err := conf.Validate(); err != nil {
+		panic("invalid config" + err.Error())
 	}
-	return &Sender{FSFilter: conf.FSF, encrypt: conf.Encrypt, holdTag: conf.HoldTag}
+	stepHoldTag, err := zfs.StepHoldTag(conf.JobID)
+	if err != nil {
+		panic("config validation should have caught error: " + err.Error())
+	}
+	return &Sender{FSFilter: conf.FSF, encrypt: conf.Encrypt, stepHoldTag: stepHoldTag}
 }
 
 func (s *Sender) filterCheckFS(fs string) (*zfs.DatasetPath, error) {
@@ -167,16 +179,21 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.St
 	}
 
 	// make sure incremental replication is resumable even if `From` is destroyed
-	// (if `From` is a snapshot), by bookmarking it
+	// (if `From` is a snapshot, by bookmarking it)
+	// (if `From` is a bookmark, by copying the bookmark TODO https://github.com/zfsonlinux/zfs/pull/9571)
 	if sendArgs.From != nil && r.GetFrom().GetType() == pdu.FilesystemVersion_Snapshot {
-		// in theory, this should always be a no-op (idempotent!)
-		err := zfs.ZFSSetReplicationCursor(sendArgsFSDP, sendArgs.From.RelName[1:], sendArgs.From.GUID) // FIXME
+		// For all but the first replciation, this should always be a no-op because SendCompleted already moved the cursor
+		snapname := sendArgs.From.RelName[1:]
+		err := zfs.ZFSSetReplicationCursor(sendArgsFSDP, snapname, sendArgs.From.GUID, s.jobId)
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "cannot set replication cursor to `from` version before starting send")
 		}
+	} else if sendArgs.From != nil && r.GetFrom().GetType() == pdu.FilesystemVersion_Bookmark {
+		// TODO implement step bookmark as proposed in design doc
 	}
+
 	// make sure replication is resumable by creating a hold on `To`
-	err = zfs.ZFSHold(ctx, sendArgs.FS, sendArgs.To.RelName[1:], s.holdTag) // FIXME
+	err = zfs.ZFSHold(ctx, sendArgs.FS, sendArgs.To.RelName[1:], s.stepHoldTag)
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "cannot hold `to` version %q before starting send", sendArgs.To.RelName)
 	}
@@ -218,7 +235,7 @@ func (p *Sender) ReplicationCursor(ctx context.Context, req *pdu.ReplicationCurs
 		return nil, err
 	}
 
-	cursor, err := zfs.ZFSGetReplicationCursor(dp)
+	cursor, err := zfs.ZFSGetReplicationCursor(dp, p.jobId)
 	if err != nil {
 		return nil, err
 	}
@@ -286,16 +303,16 @@ func (p *Sender) moveCursorAndReleaseSendHold(ctx context.Context, fs string, mr
 		WithField("mrcv", mrcv.String())
 
 	log.Debug("move replication cursor to most recent common version")
-	err = zfs.ZFSSetReplicationCursor(dp, mrcv.GetName(), mrcv.GetGuid())
+	err = zfs.ZFSSetReplicationCursor(dp, mrcv.GetName(), mrcv.GetGuid(), p.jobId)
 	if err != nil {
 		// it is correct to not release the hold if we can't move the cursor!
 		return errors.Wrap(err, "cannot set replication cursor")
 	}
 	log.Info("successfully moved replication cursor")
 
-	log = log.WithField("hold_tag", p.holdTag)
+	log = log.WithField("hold_tag", p.stepHoldTag)
 	log.Debug("release holds earlier than most recent common version")
-	err = zfs.ZFSReleaseAllOlderAndIncludingGUID(ctx, dp.ToString(), mrcv.GetGuid(), p.holdTag)
+	err = zfs.ZFSReleaseAllOlderAndIncludingGUID(ctx, dp.ToString(), mrcv.GetGuid(), p.stepHoldTag)
 	if err != nil {
 		return errors.Wrap(err, "cannot release holds up to most recent common version")
 	}

@@ -2,6 +2,8 @@ The goal of this document is to describe what logical steps zrepl takes to repli
 
 * The [Single Replication Step](#zrepl-algo-single-step) algorithm is implemented as described
   * the feature to hold receive-side `to` immediately after replication is not used, though
+  * the step bookmark of a `from` snapshot is implemented through the zrepl-managed replication cursor bookmark, which contains the `jobid`. 
+  * the step bookmark of a `from` bookmark is not implemented, but as pointed out in the algorithm, this is not fatal
 * The [Algorithm for Planning and Executing Replication of an Filesystems](#zrepl-algo-filesystem) is a design draft
 * The [Notes on Planning and Executing Replication of Multiple Filesystems](#zrepl-algo-multiple-filesystems-notes) cover 
 

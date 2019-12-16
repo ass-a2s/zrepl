@@ -9,7 +9,7 @@ import (
 const ReplicationCursorBookmarkName = "zrepl_replication_cursor"
 
 // may return nil for both values, indicating there is no cursor
-func ZFSGetReplicationCursor(fs *DatasetPath) (*FilesystemVersion, error) {
+func ZFSGetReplicationCursor(fs *DatasetPath, jobid JobID) (*FilesystemVersion, error) {
 	versions, err := ZFSListFilesystemVersions(fs, nil)
 	if err != nil {
 		return nil, err
@@ -24,12 +24,15 @@ func ZFSGetReplicationCursor(fs *DatasetPath) (*FilesystemVersion, error) {
 
 // expGuid is the expected guid of snapname
 // if fs@snapname has a different guid, the replication cursor won't be set
-func ZFSSetReplicationCursor(fs *DatasetPath, snapname string, expGuid uint64) (err error) {
+func ZFSSetReplicationCursor(fs *DatasetPath, snapname string, expGuid uint64, jobid JobID) (err error) {
 	if fs.Length() == 0 {
 		return errors.New("filesystem name must not be empty")
 	}
 	if len(snapname) == 0 {
 		return errors.New("snapname must not be empty")
+	}
+	if snapname[0] == '@' {
+		return errors.New("snapname must not start with '@' (just the snapshot name)")
 	}
 	// must not check expGuid == 0, that might be legitimate
 	snapPath := fmt.Sprintf("%s@%s", fs.ToString(), snapname)
